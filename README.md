@@ -45,7 +45,7 @@ Copy `.env.example` to `.env` and fill in:
 | `WEBHOOK_SECRET` | strongly recommended | TradingView sends this back as `?token=...` on the alert URL (TradingView alerts can't set custom headers) |
 | `SUPABASE_URL` | yes | Your Supabase project URL |
 | `SUPABASE_SERVICE_KEY` | yes | **Service role** key, not the anon key — this server needs write access to every table |
-| `UPSTOX_API_BASE_URL` | yes | Upstox **sandbox** host — double-check this against current Upstox docs |
+| `UPSTOX_API_BASE_URL` | yes | `https://api-sandbox.upstox.com/v2` — confirmed by direct testing (Upstox's own docs don't state it plainly) |
 | `UPSTOX_SANDBOX_ACCESS_TOKEN` | yes | Sandbox access token from Upstox developer console |
 | `DEFAULT_INSTRUMENT_TOKEN` | no | Fallback only — see note below |
 | `DEFAULT_QUANTITY` | no | Fallback only |

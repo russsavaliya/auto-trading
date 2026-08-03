@@ -46,8 +46,8 @@ const config = {
 
   supabaseUrl: process.env.SUPABASE_URL,
   supabaseServiceKey: process.env.SUPABASE_SERVICE_KEY,
-
-  upstoxApiBaseUrl: process.env.UPSTOX_API_BASE_URL.replace(/\/+$/, ''),
+  
+  upstoxApiBaseUrl: process.env.UPSTOX_API_BASE_URL.replace(/\/+$/, ''),  // https://api-sandbox.upstox.com/v2
   upstoxAccessToken: process.env.UPSTOX_SANDBOX_ACCESS_TOKEN,
   upstoxMaxRetries: parseIntEnv(process.env.UPSTOX_MAX_RETRIES, 2),
   upstoxRetryBaseDelayMs: parseIntEnv(process.env.UPSTOX_RETRY_BASE_DELAY_MS, 500),
