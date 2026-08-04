@@ -7,6 +7,7 @@ const supabaseService = require('../services/supabaseService');
 const duplicateCheck = require('../services/duplicateCheck');
 const positionState = require('../services/positionState');
 const upstoxService = require('../services/upstoxService');
+const instrumentResolver = require('../services/instrumentResolver');
 
 const router = express.Router();
 
@@ -20,7 +21,29 @@ async function finish(req, res, { status, processed, reason, body }) {
 }
 
 async function handleEntry(req, res) {
-  const { alertId, symbol, signalType, price, score, instrumentToken, quantity, product, orderType } = req.webhookPayload;
+  const { alertId, symbol, signalType, price, score, quantity, product, orderType } = req.webhookPayload;
+  let { instrumentToken } = req.webhookPayload;
+
+  // No instrument_token in the payload -> auto-resolve the current-cycle
+  // ATM contract from the underlying price. An explicit instrument_token in
+  // the payload is still honored as-is (manual override stays available).
+  // Resolved BEFORE the trade row / position reservation exist, so a
+  // resolution failure leaves nothing to roll back — just log and bail.
+  if (!instrumentToken) {
+    try {
+      const resolved = await instrumentResolver.resolveEntryInstrument({ signalType, symbol, price });
+      instrumentToken = resolved.instrumentToken;
+      logger.info({ symbol, signalType, price, resolved }, 'Auto-resolved ATM instrument for entry');
+    } catch (err) {
+      logger.error({ err: err.message, symbol, signalType, price }, 'ATM instrument resolution failed — no order placed');
+      return finish(req, res, {
+        status: 502,
+        processed: false,
+        reason: `instrument_resolution_failed: ${err.message}`,
+        body: { status: 'instrument_resolution_failed', error: err.message },
+      });
+    }
+  }
 
   const tradeId = await supabaseService.insertTrade({
     alertId,

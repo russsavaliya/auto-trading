@@ -57,6 +57,12 @@ const config = {
   defaultProduct: process.env.DEFAULT_PRODUCT || 'I',
   defaultOrderType: process.env.DEFAULT_ORDER_TYPE || 'MARKET',
 
+  // ATM instrument auto-resolution — used when a webhook doesn't include an
+  // explicit instrument_token, so entries don't depend on a manually
+  // maintained value. See services/instrumentResolver.js.
+  strikeInterval: parseIntEnv(process.env.STRIKE_INTERVAL, 100),
+  instrumentMasterCacheTtlMs: parseIntEnv(process.env.INSTRUMENT_MASTER_CACHE_TTL_MS, 6 * 60 * 60 * 1000),
+
   // Fallback only — used if the Supabase app_config read fails. Real toggling
   // should happen via the app_config.trading_enabled row (see kill switch docs).
   tradingEnabledFallback: parseBool(process.env.TRADING_ENABLED, true),

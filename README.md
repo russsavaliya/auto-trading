@@ -16,8 +16,10 @@ services/upstoxService.js     Order placement against Upstox sandbox, with retry
 services/supabaseService.js   All Supabase reads/writes
 services/duplicateCheck.js    Idempotency (alert_id + time-window) logic
 services/positionState.js     FLAT / IN_CALL / IN_PUT state machine helpers
+services/instrumentResolver.js Auto-resolves the ATM instrument_token from price
 utils/logger.js               pino logger
 utils/retry.js                Generic exponential-backoff retry helper
+scripts/find-instrument.js    Manual instrument_token lookup CLI (debugging/override)
 sql/schema.sql                Supabase schema — run this first
 ```
 
@@ -47,7 +49,7 @@ Copy `.env.example` to `.env` and fill in:
 | `SUPABASE_SERVICE_KEY` | yes | **Service role** key, not the anon key — this server needs write access to every table |
 | `UPSTOX_API_BASE_URL` | yes | `https://api-sandbox.upstox.com/v2` — confirmed by direct testing (Upstox's own docs don't state it plainly) |
 | `UPSTOX_SANDBOX_ACCESS_TOKEN` | yes | Sandbox access token from Upstox developer console |
-| `DEFAULT_INSTRUMENT_TOKEN` | no | Fallback only — see note below |
+| `DEFAULT_INSTRUMENT_TOKEN` | no | Manual override fallback only — see note below |
 | `DEFAULT_QUANTITY` | no | Fallback only |
 | `DEFAULT_PRODUCT` | no (default `I`) | Upstox product code (`I` = intraday) |
 | `DEFAULT_ORDER_TYPE` | no (default `MARKET`) | |
@@ -55,16 +57,36 @@ Copy `.env.example` to `.env` and fill in:
 | `DUPLICATE_WINDOW_SECONDS` | no (default 30) | Soft duplicate window |
 | `UPSTOX_MAX_RETRIES` | no (default 2) | Retries on top of the first attempt |
 | `UPSTOX_RETRY_BASE_DELAY_MS` | no (default 500) | Backoff base |
+| `STRIKE_INTERVAL` | no (default 100) | Strike spacing used for ATM rounding (Bank Nifty = 100) |
+| `INSTRUMENT_MASTER_CACHE_TTL_MS` | no (default 6h) | How long the instrument master is cached before refreshing |
 
-**Important gap to be aware of:** the sample TradingView payload below only
-has `symbol` (e.g. `"BANKNIFTY"`), not a specific option contract. Upstox
-needs the *exact* `instrument_token` for the strike/expiry you're trading,
-which changes every week. This bridge accepts `instrument_token` and
-`quantity` directly in the alert JSON (recommended — update your Pine
-Script inputs each week) and only falls back to
-`DEFAULT_INSTRUMENT_TOKEN`/`DEFAULT_QUANTITY` for quick single-contract
-testing. There's no automatic strike-selection logic here — that's a
-separate concern (an instrument lookup service) outside this bridge's scope.
+**How `instrument_token` gets resolved:** the sample TradingView payload only
+has `symbol` (e.g. `"BANKNIFTY"`) and `price` (the underlying's price), not a
+specific option contract. On every entry signal where the payload doesn't
+include an explicit `instrument_token`, `services/instrumentResolver.js`
+auto-resolves it: it downloads (and caches, refreshing every
+`INSTRUMENT_MASTER_CACHE_TTL_MS`) Upstox's public instrument master, rounds
+`price` to the nearest `STRIKE_INTERVAL` to get the ATM strike, and picks the
+soonest expiry that hasn't passed for that strike/CE-or-PE. This has been
+tested end-to-end against the real Upstox sandbox and correctly places the
+order against the resolved contract. Exits don't need this — they reuse the
+`instrument_token` stored on the original entry's `trades` row, not
+whatever's in the exit payload.
+
+An explicit `instrument_token` in the payload still overrides auto-resolution
+if you ever want to force a specific contract (e.g. a non-ATM strike, or for
+testing). `DEFAULT_INSTRUMENT_TOKEN` is a lower-priority fallback below that.
+
+For manual lookup/debugging, `scripts/find-instrument.js` does the same
+instrument-master search standalone:
+```bash
+node scripts/find-instrument.js BANKNIFTY 63800 CE
+```
+Note: Bank Nifty options are **monthly only** now (NSE discontinued the
+weekly Bank Nifty expiry) — confirmed directly against the instrument
+master. Current `lot_size` for BANKNIFTY is 30 (also confirmed from the
+master — re-check periodically since exchanges do revise lot sizes; this
+bridge does not auto-derive quantity, only the instrument_token).
 
 ## 3. Install and run
 
@@ -91,12 +113,11 @@ e.g.:
 {
   "signal_type": "CALL_ENTRY",
   "symbol": "BANKNIFTY",
-  "price": 542.35,
-  "score": 8.4,
+  "price": 63820,
+  "score": 5,
   "timestamp": "{{timenow}}",
   "alert_id": "{{time}}-CALL_ENTRY",
-  "instrument_token": "NSE_FO|48849",
-  "quantity": 35,
+  "quantity": 30,
   "product": "I",
   "order_type": "MARKET"
 }
@@ -106,9 +127,10 @@ e.g.:
 - `alert_id`: must be unique per distinct signal — bar time + signal type
   (as you described) is exactly right, e.g. `{{time}}-{{strategy.order.id}}`
   or built manually in Pine as `str.tostring(time) + "-CALL_ENTRY"`
-- `instrument_token` / `quantity` / `product` / `order_type` are optional if
-  you've set matching `DEFAULT_*` env vars, but you should pass them
-  explicitly once you're trading real contracts
+- `instrument_token` is intentionally **not** sent — the bridge auto-resolves
+  it from `price`. Only include it if you want to override auto-resolution.
+- `quantity` / `product` / `order_type` are optional if you've set matching
+  `DEFAULT_*` env vars, but pass them explicitly once trading real contracts
 
 Set the alert webhook URL to:
 
@@ -121,18 +143,17 @@ https://your-server.example.com/webhook/tradingview?token=YOUR_WEBHOOK_SECRET
 With the server running on port 3000 and `WEBHOOK_SECRET=test-secret` in `.env`:
 
 ```bash
-# Entry signal
+# Entry signal — no instrument_token, the bridge resolves the ATM contract from "price"
 curl -X POST "http://localhost:3000/webhook/tradingview?token=test-secret" \
   -H "Content-Type: application/json" \
   -d '{
     "signal_type": "CALL_ENTRY",
     "symbol": "BANKNIFTY",
-    "price": 542.35,
-    "score": 8.4,
-    "timestamp": "2026-08-03T09:20:00Z",
+    "price": 63820,
+    "score": 5,
+    "timestamp": "2026-08-04T09:20:00Z",
     "alert_id": "1754210400-CALL_ENTRY",
-    "instrument_token": "NSE_FO|48849",
-    "quantity": 35
+    "quantity": 30
   }'
 
 # Re-send the SAME alert_id — should come back as duplicate_skipped, no new order
@@ -141,23 +162,22 @@ curl -X POST "http://localhost:3000/webhook/tradingview?token=test-secret" \
   -d '{
     "signal_type": "CALL_ENTRY",
     "symbol": "BANKNIFTY",
-    "price": 542.35,
-    "score": 8.4,
-    "timestamp": "2026-08-03T09:20:00Z",
+    "price": 63820,
+    "score": 5,
+    "timestamp": "2026-08-04T09:20:00Z",
     "alert_id": "1754210400-CALL_ENTRY",
-    "instrument_token": "NSE_FO|48849",
-    "quantity": 35
+    "quantity": 30
   }'
 
-# Exit signal (different alert_id)
+# Exit signal (different alert_id) — uses the instrument_token stored on the entry, not this payload
 curl -X POST "http://localhost:3000/webhook/tradingview?token=test-secret" \
   -H "Content-Type: application/json" \
   -d '{
     "signal_type": "CALL_EXIT",
     "symbol": "BANKNIFTY",
-    "price": 561.10,
-    "score": 3.1,
-    "timestamp": "2026-08-03T10:05:00Z",
+    "price": 63950,
+    "score": 1,
+    "timestamp": "2026-08-04T10:05:00Z",
     "alert_id": "1754213100-CALL_EXIT"
   }'
 ```
@@ -174,9 +194,6 @@ row written to `trades`.
   and confirm the current sandbox base URL in their docs — set both in `.env`
 - Pick a strong `WEBHOOK_SECRET` and put it in the TradingView alert URL's
   `?token=` query param
-- Decide how you'll keep `instrument_token` current week-to-week (manually
-  update the Pine Script alert message, or build a small lookup step) —
-  this bridge does not derive it for you
 - Deploy the server somewhere TradingView can reach it over HTTPS (TradingView
   alerts cannot call `localhost`) — e.g. a small VPS, Render, Fly.io, etc.,
   with `NODE_ENV=production`
