@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: tradingview-upstox-bridge
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: UPSTOX_API_BASE_URL
+        value: https://api-sandbox.upstox.com/v2
+      - key: DEFAULT_PRODUCT
+        value: I
+      - key: DEFAULT_ORDER_TYPE
+        value: MARKET
+      - key: TRADING_ENABLED
+        value: "true"
+      - key: DUPLICATE_WINDOW_SECONDS
+        value: "30"
+      - key: UPSTOX_MAX_RETRIES
+        value: "2"
+      - key: UPSTOX_RETRY_BASE_DELAY_MS
+        value: "500"
+      - key: STRIKE_INTERVAL
+        value: "100"
+      - key: INSTRUMENT_MASTER_CACHE_TTL_MS
+        value: "21600000"
+      # Secrets — Render will prompt for these during Blueprint setup rather
+      # than storing a value here (sync: false = "no value in this file").
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: UPSTOX_SANDBOX_ACCESS_TOKEN
+        sync: false
