@@ -86,4 +86,17 @@ async function resolveEntryInstrument({ signalType, symbol, price }) {
   return { instrumentToken: m.instrument_key, lotSize: m.lot_size, tradingSymbol: m.trading_symbol };
 }
 
-module.exports = { resolveEntryInstrument };
+/**
+ * Fire-and-forget cache warm-up, called once at server startup so the first
+ * real webhook (or the very next one after any restart/redeploy) doesn't
+ * pay the ~2-5s instrument-master download+parse cost inline. Never throws —
+ * a failed warm-up just means the first request falls back to loading it
+ * lazily, same as before this existed.
+ */
+function warmUp() {
+  loadInstrumentMaster()
+    .then((instruments) => logger.info({ count: instruments.length }, 'Instrument master warm-up complete'))
+    .catch((err) => logger.warn({ err: err.message }, 'Instrument master warm-up failed — will retry lazily on first entry'));
+}
+
+module.exports = { resolveEntryInstrument, warmUp };

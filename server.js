@@ -5,6 +5,7 @@ const config = require('./config/env');
 const logger = require('./utils/logger');
 const webhookRouter = require('./routes/webhook');
 const supabaseService = require('./services/supabaseService');
+const instrumentResolver = require('./services/instrumentResolver');
 
 const app = express();
 
@@ -47,6 +48,7 @@ const server = app.listen(config.port, () => {
   logger.info(`TradingView -> Upstox webhook bridge listening on port ${config.port} (${config.nodeEnv})`);
   logger.info(`Sandbox base URL: ${config.upstoxApiBaseUrl}`);
   logger.info(`Webhook endpoint: POST /webhook/tradingview`);
+  instrumentResolver.warmUp();
 });
 
 process.on('unhandledRejection', (reason) => {
