@@ -56,3 +56,7 @@ Upstox Sandbox API (paper trade order place)
 - State check hamesha Supabase se fresh read ho, cache na ho (especially kill switch flag).
 - Real credentials kabhi bhi commit ya kisi third-party tool/chat mein paste na ho.
 - Sandbox endpoint hi use ho jab tak explicit decision na le ki live jaana hai.
+
+## pannding pase 2: 
+not pick order afer 3 PM and agar koi order alredy pick kiya hua he to and 3 PM ho chuke he to use bhechna hoga. 
+ kyo ki hame aek dina ka tread usi din bechna he bhale hi expire date dur ki ho hame tread ko same day hi sell karna hoga .
