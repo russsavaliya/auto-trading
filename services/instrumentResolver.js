@@ -15,33 +15,36 @@ const SIGNAL_TO_OPTION_TYPE = { CALL_ENTRY: 'CE', PUT_ENTRY: 'PE' };
 let cache = { instruments: null, fetchedAt: 0 };
 
 /**
- * Downloads + caches the instrument master, filtered down to NSE F&O
- * CE/PE contracts (the only rows this bridge ever looks up), so the
- * in-memory cache stays small instead of holding all ~78k NSE instruments.
- * Cached for config.instrumentMasterCacheTtlMs; on a refresh failure with an
- * existing cache, serves the stale copy rather than failing every entry —
- * a few-hours-old contract list is still correct almost all the time,
- * whereas refusing every trade because of one transient fetch failure is a
- * worse outcome for a system whose whole point is placing entries reliably.
+ * Downloads + parses the instrument master, filtered down to NSE F&O CE/PE
+ * contracts (the only rows this bridge ever looks up), and replaces the
+ * cache. Called from warmUp() at boot and again on a recurring background
+ * timer (see schedulePeriodicRefresh) — never from inside a webhook request,
+ * so a live signal is never the one paying the ~2-5s download+parse cost.
+ * On failure, the previous cache is left untouched (served stale rather
+ * than emptied) — a few-hours-old contract list is still correct almost
+ * all the time, whereas losing the cache on one transient fetch failure
+ * would make every entry after it fail too.
+ */
+async function refresh() {
+  const res = await axios.get(INSTRUMENT_MASTER_URL, { responseType: 'arraybuffer', timeout: 15000 });
+  const all = JSON.parse(zlib.gunzipSync(res.data).toString('utf8'));
+  const filtered = all.filter((i) => i.segment === 'NSE_FO' && (i.instrument_type === 'CE' || i.instrument_type === 'PE'));
+  cache = { instruments: filtered, fetchedAt: Date.now() };
+  logger.info({ count: filtered.length }, 'Instrument master refreshed');
+  return filtered;
+}
+
+/**
+ * Returns the cached instrument list. Freshness is entirely the background
+ * timer's responsibility (see schedulePeriodicRefresh) — this never blocks
+ * on a network call except as a last-resort bootstrap if a request somehow
+ * arrives before the very first warm-up completed (should be rare/never in
+ * practice, since warmUp() is awaited-in-spirit right at server boot).
  */
 async function loadInstrumentMaster() {
-  const isStale = Date.now() - cache.fetchedAt > config.instrumentMasterCacheTtlMs;
-  if (cache.instruments && !isStale) return cache.instruments;
-
-  try {
-    const res = await axios.get(INSTRUMENT_MASTER_URL, { responseType: 'arraybuffer', timeout: 15000 });
-    const all = JSON.parse(zlib.gunzipSync(res.data).toString('utf8'));
-    const filtered = all.filter((i) => i.segment === 'NSE_FO' && (i.instrument_type === 'CE' || i.instrument_type === 'PE'));
-    cache = { instruments: filtered, fetchedAt: Date.now() };
-    logger.info({ count: filtered.length }, 'Instrument master refreshed');
-    return filtered;
-  } catch (err) {
-    if (cache.instruments) {
-      logger.warn({ err: err.message }, 'Instrument master refresh failed — serving stale cache');
-      return cache.instruments;
-    }
-    throw err;
-  }
+  if (cache.instruments) return cache.instruments;
+  logger.warn('Instrument master requested before warm-up completed — fetching inline this one time');
+  return refresh();
 }
 
 /**
@@ -87,16 +90,31 @@ async function resolveEntryInstrument({ signalType, symbol, price }) {
 }
 
 /**
- * Fire-and-forget cache warm-up, called once at server startup so the first
- * real webhook (or the very next one after any restart/redeploy) doesn't
- * pay the ~2-5s instrument-master download+parse cost inline. Never throws —
- * a failed warm-up just means the first request falls back to loading it
- * lazily, same as before this existed.
+ * Keeps the cache from ever going stale during normal operation, entirely
+ * in the background — a webhook request only ever reads whatever's already
+ * cached (see loadInstrumentMaster), it never waits on this timer.
+ * unref() so this recurring timer can't by itself keep the process alive.
+ */
+function schedulePeriodicRefresh() {
+  const timer = setInterval(() => {
+    refresh().catch((err) => logger.warn({ err: err.message }, 'Background instrument master refresh failed — keeping previous cache'));
+  }, config.instrumentMasterCacheTtlMs);
+  timer.unref();
+}
+
+/**
+ * Called once at server startup: fetches immediately so the first real
+ * webhook (or the next one after any restart/redeploy) doesn't pay the
+ * download+parse cost inline, then starts the recurring background refresh
+ * so the cache never goes stale for the rest of the process's lifetime.
+ * Never throws — a failed initial fetch just means loadInstrumentMaster()
+ * falls back to fetching inline on whichever request needs it first.
  */
 function warmUp() {
-  loadInstrumentMaster()
+  refresh()
     .then((instruments) => logger.info({ count: instruments.length }, 'Instrument master warm-up complete'))
-    .catch((err) => logger.warn({ err: err.message }, 'Instrument master warm-up failed — will retry lazily on first entry'));
+    .catch((err) => logger.warn({ err: err.message }, 'Instrument master warm-up failed — will retry lazily on first entry'))
+    .finally(() => schedulePeriodicRefresh());
 }
 
 module.exports = { resolveEntryInstrument, warmUp };
