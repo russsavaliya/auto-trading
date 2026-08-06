@@ -4,12 +4,27 @@ const express = require('express');
 const config = require('./config/env');
 const logger = require('./utils/logger');
 const webhookRouter = require('./routes/webhook');
+const adminRouter = require('./routes/admin');
 const supabaseService = require('./services/supabaseService');
 const instrumentResolver = require('./services/instrumentResolver');
 
 const app = express();
 
 app.use(express.json({ limit: '1mb' }));
+
+// CORS for the admin dashboard frontend only — the webhook endpoint doesn't
+// need it (TradingView calls it server-to-server, not from a browser).
+app.use('/api', (req, res, next) => {
+  const origin = config.adminAllowedOrigin || '*';
+  res.header('Access-Control-Allow-Origin', origin);
+  res.header('Access-Control-Allow-Headers', 'Content-Type, x-admin-password');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
 
 app.get('/health', async (req, res) => {
   let reachable = false;
@@ -30,6 +45,7 @@ app.get('/health', async (req, res) => {
 });
 
 app.use('/webhook', webhookRouter);
+app.use('/api', adminRouter);
 
 app.use((req, res) => {
   res.status(404).json({ status: 'error', message: 'Not found' });

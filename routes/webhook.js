@@ -14,15 +14,16 @@ const router = express.Router();
 const ENTRY_SIGNALS = new Set(['CALL_ENTRY', 'PUT_ENTRY']);
 const EXIT_SIGNALS = new Set(['CALL_EXIT', 'PUT_EXIT']);
 
-/** Finalizes the webhook_log row and sends the HTTP response in one place, so no code path forgets one or the other. */
-async function finish(req, res, { status, processed, reason, body }) {
-  await supabaseService.updateWebhookLog(req.webhookLogId, { processed, reason });
-  return res.status(status).json(body);
+/** Marks the webhook_log row with the final outcome. Response to TradingView has
+ * already gone out by the time this runs — see the route handler below — so this
+ * only ever affects the audit trail / admin dashboard, never the HTTP reply. */
+async function markLog(webhookLogId, { processed, reason }) {
+  await supabaseService.updateWebhookLog(webhookLogId, { processed, reason });
 }
 
-async function handleEntry(req, res) {
-  const { alertId, symbol, signalType, price, score, quantity, product, orderType } = req.webhookPayload;
-  let { instrumentToken } = req.webhookPayload;
+async function handleEntry(webhookLogId, payload) {
+  const { alertId, symbol, signalType, price, score, quantity, product, orderType } = payload;
+  let { instrumentToken } = payload;
 
   // No instrument_token in the payload -> auto-resolve the current-cycle
   // ATM contract from the underlying price. An explicit instrument_token in
@@ -36,12 +37,7 @@ async function handleEntry(req, res) {
       logger.info({ symbol, signalType, price, resolved }, 'Auto-resolved ATM instrument for entry');
     } catch (err) {
       logger.error({ err: err.message, symbol, signalType, price }, 'ATM instrument resolution failed — no order placed');
-      return finish(req, res, {
-        status: 502,
-        processed: false,
-        reason: `instrument_resolution_failed: ${err.message}`,
-        body: { status: 'instrument_resolution_failed', error: err.message },
-      });
+      return markLog(webhookLogId, { processed: false, reason: `instrument_resolution_failed: ${err.message}` });
     }
   }
 
@@ -64,12 +60,7 @@ async function handleEntry(req, res) {
     await supabaseService.markTradeFailed(tradeId, {
       errorMessage: `Rejected: symbol already ${reservation.previousState}, not FLAT`,
     });
-    return finish(req, res, {
-      status: 200,
-      processed: false,
-      reason: `invalid_state: already ${reservation.previousState}`,
-      body: { status: 'skipped', reason: 'already_in_position', current_state: reservation.previousState },
-    });
+    return markLog(webhookLogId, { processed: false, reason: `invalid_state: already ${reservation.previousState}` });
   }
 
   try {
@@ -85,12 +76,7 @@ async function handleEntry(req, res) {
     await supabaseService.markTradeFilled(tradeId, { upstoxOrderId: orderId });
     logger.info({ tradeId, orderId, symbol, signalType }, 'Entry order placed successfully');
 
-    return finish(req, res, {
-      status: 200,
-      processed: true,
-      reason: null,
-      body: { status: 'order_placed', trade_id: tradeId, order_id: orderId },
-    });
+    return markLog(webhookLogId, { processed: true, reason: null });
   } catch (err) {
     logger.error({ err: err.message, tradeId, symbol, signalType }, 'Entry order placement failed — rolling back reserved position state');
     await supabaseService.markTradeFailed(tradeId, { errorMessage: err.message });
@@ -98,17 +84,12 @@ async function handleEntry(req, res) {
     // position that was never actually opened at the broker.
     await positionState.rollbackEntry({ symbol, signalType });
 
-    return finish(req, res, {
-      status: 502,
-      processed: false,
-      reason: `order_failed: ${err.message}`,
-      body: { status: 'order_failed', trade_id: tradeId, error: err.message },
-    });
+    return markLog(webhookLogId, { processed: false, reason: `order_failed: ${err.message}` });
   }
 }
 
-async function handleExit(req, res) {
-  const { symbol, signalType, price, score, product, orderType } = req.webhookPayload;
+async function handleExit(webhookLogId, payload) {
+  const { symbol, signalType, price, score, product, orderType } = payload;
 
   // Reserve FLAT BEFORE placing the order. If the symbol isn't currently on
   // the matching side, this is an orphan/invalid exit signal — reject it.
@@ -116,12 +97,7 @@ async function handleExit(req, res) {
 
   if (!reservation.success) {
     logger.warn({ symbol, signalType, currentState: reservation.previousState }, 'Exit rejected: not in a matching position');
-    return finish(req, res, {
-      status: 200,
-      processed: false,
-      reason: `invalid_state: not in position (current=${reservation.previousState})`,
-      body: { status: 'skipped', reason: 'not_in_position', current_state: reservation.previousState },
-    });
+    return markLog(webhookLogId, { processed: false, reason: `invalid_state: not in position (current=${reservation.previousState})` });
   }
 
   const tradeId = reservation.previousTradeId;
@@ -131,12 +107,7 @@ async function handleExit(req, res) {
     // rather than guessing at an instrument_token/quantity to sell.
     logger.error({ symbol, signalType }, 'Exit reserved but no linked trade_id found — reverting state');
     await positionState.rollbackExit({ symbol, signalType, tradeId: null });
-    return finish(req, res, {
-      status: 500,
-      processed: false,
-      reason: 'missing_trade_reference',
-      body: { status: 'error', message: 'No open trade linked to current position — manual review required' },
-    });
+    return markLog(webhookLogId, { processed: false, reason: 'missing_trade_reference' });
   }
 
   const trade = await supabaseService.getTradeById(tradeId);
@@ -155,12 +126,7 @@ async function handleExit(req, res) {
     await supabaseService.closeTrade(tradeId, { exitPrice: price, scoreAtExit: score, exitOrderId: orderId, pnl });
     logger.info({ tradeId, orderId, symbol, signalType, pnl }, 'Exit order placed successfully, trade closed');
 
-    return finish(req, res, {
-      status: 200,
-      processed: true,
-      reason: null,
-      body: { status: 'position_closed', trade_id: tradeId, order_id: orderId, pnl },
-    });
+    return markLog(webhookLogId, { processed: true, reason: null });
   } catch (err) {
     logger.error({ err: err.message, tradeId, symbol, signalType }, 'Exit order placement failed — rolling back reserved position state');
     await supabaseService.recordExitFailure(tradeId, { errorMessage: err.message });
@@ -168,29 +134,24 @@ async function handleExit(req, res) {
     // as the bridge is concerned the position is still open.
     await positionState.rollbackExit({ symbol, signalType, tradeId });
 
-    return finish(req, res, {
-      status: 502,
-      processed: false,
-      reason: `exit_order_failed: ${err.message}`,
-      body: { status: 'order_failed', trade_id: tradeId, error: err.message },
-    });
+    return markLog(webhookLogId, { processed: false, reason: `exit_order_failed: ${err.message}` });
   }
 }
 
-router.post('/tradingview', validateWebhook, async (req, res) => {
-  // Top-level safety net: no matter what throws below, TradingView always
-  // gets a response and the process never crashes on a bad/unexpected input.
+/**
+ * Everything past the initial ack — duplicate check, kill switch, order
+ * placement — runs here, after TradingView already has its response. This
+ * can take as long as it needs (Upstox retries, backoff, etc.) without ever
+ * risking a client-side webhook timeout; the webhook_log row is the only
+ * record of how it turned out.
+ */
+async function processInBackground(webhookLogId, payload) {
   try {
-    const { alertId, symbol, signalType } = req.webhookPayload;
+    const { alertId, symbol, signalType } = payload;
 
     const dup = await duplicateCheck.checkDuplicate({ alertId, symbol, signalType });
     if (dup.isDuplicate) {
-      return finish(req, res, {
-        status: 200,
-        processed: false,
-        reason: dup.reason,
-        body: { status: 'duplicate_skipped', reason: dup.reason },
-      });
+      return await markLog(webhookLogId, { processed: false, reason: dup.reason });
     }
 
     // Checked fresh on every single request — never cached — so toggling
@@ -198,38 +159,40 @@ router.post('/tradingview', validateWebhook, async (req, res) => {
     const tradingEnabled = await supabaseService.isTradingEnabled();
     if (!tradingEnabled) {
       logger.warn({ symbol, signalType, alertId }, 'Trading paused (kill switch off) — webhook logged, no order placed');
-      return finish(req, res, {
-        status: 200,
-        processed: false,
-        reason: 'trading_disabled',
-        body: { status: 'trading_paused', message: 'Kill switch is off — no order placed' },
-      });
+      return await markLog(webhookLogId, { processed: false, reason: 'trading_disabled' });
     }
 
     if (ENTRY_SIGNALS.has(signalType)) {
-      return await handleEntry(req, res);
+      return await handleEntry(webhookLogId, payload);
     }
     if (EXIT_SIGNALS.has(signalType)) {
-      return await handleExit(req, res);
+      return await handleExit(webhookLogId, payload);
     }
 
     // Unreachable given validateWebhook's schema check, but keeps this
     // handler safe if that check is ever loosened.
-    return finish(req, res, {
-      status: 400,
-      processed: false,
-      reason: `unknown_signal_type: ${signalType}`,
-      body: { status: 'error', message: `Unknown signal_type: ${signalType}` },
-    });
+    return await markLog(webhookLogId, { processed: false, reason: `unknown_signal_type: ${signalType}` });
   } catch (err) {
-    logger.error({ err: err.message, stack: err.stack }, 'Unhandled error in webhook handler');
+    logger.error({ err: err.message, stack: err.stack }, 'Unhandled error in background webhook processing');
     try {
-      await supabaseService.updateWebhookLog(req.webhookLogId, { processed: false, reason: `unhandled_error: ${err.message}` });
+      await markLog(webhookLogId, { processed: false, reason: `unhandled_error: ${err.message}` });
     } catch (logErr) {
       logger.error({ err: logErr.message }, 'Failed to record unhandled_error in webhook_log');
     }
-    return res.status(500).json({ status: 'error', message: 'Internal error processing webhook' });
   }
+}
+
+router.post('/tradingview', validateWebhook, (req, res) => {
+  // Ack TradingView immediately — validateWebhook has already persisted the
+  // webhook_log row, so the call is durably recorded even if everything below
+  // this line crashes. Actual order placement happens after the response is
+  // sent, so a slow/retrying Upstox call can never make TradingView time out
+  // and mark a real, successfully-processed alert as "failed".
+  res.status(200).json({ status: 'received', webhook_log_id: req.webhookLogId });
+
+  processInBackground(req.webhookLogId, req.webhookPayload).catch((err) => {
+    logger.error({ err: err.message, stack: err.stack }, 'processInBackground rejected unexpectedly');
+  });
 });
 
 module.exports = router;

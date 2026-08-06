@@ -264,10 +264,109 @@ async function recordExitFailure(tradeId, { errorMessage }) {
   if (error) logger.error({ err: error, tradeId }, 'Failed to record exit failure on trade');
 }
 
+/**
+ * Most recent webhook_log rows, newest first — the audit trail of every hit
+ * to /webhook/tradingview regardless of outcome. Since order placement now
+ * runs after the response is already sent (see routes/webhook.js), this is
+ * the only place to see whether a given alert actually got processed.
+ */
+async function listWebhookLogs({ processed, limit = 50, offset = 0 } = {}) {
+  let query = supabase
+    .from('webhook_log')
+    .select('*', { count: 'exact' })
+    .order('received_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (processed !== undefined) {
+    query = query.eq('processed', processed);
+  }
+
+  const { data, error, count } = await query;
+  if (error) {
+    logger.error({ err: error }, 'Failed to list webhook_log');
+    throw error;
+  }
+  return { logs: data, total: count };
+}
+
+// ----------------------------------------------------------------------------
+// admin dashboard queries (read-only, used by routes/admin.js)
+// ----------------------------------------------------------------------------
+
+async function listTrades({ status, limit = 50, offset = 0 } = {}) {
+  let query = supabase
+    .from('trades')
+    .select('*', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (status) {
+    query = query.eq('status', status);
+  }
+
+  const { data, error, count } = await query;
+  if (error) {
+    logger.error({ err: error }, 'Failed to list trades');
+    throw error;
+  }
+  return { trades: data, total: count };
+}
+
+async function listRunningTrades() {
+  const { data, error } = await supabase
+    .from('trades')
+    .select('*')
+    .in('status', ['PENDING', 'FILLED'])
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    logger.error({ err: error }, 'Failed to list running trades');
+    throw error;
+  }
+  return data;
+}
+
+async function getClosedTradesSince(sinceIso) {
+  let query = supabase
+    .from('trades')
+    .select('id, symbol, signal_type, pnl, quantity, entry_price, exit_price, created_at, closed_at')
+    .eq('status', 'CLOSED')
+    .order('closed_at', { ascending: true });
+
+  if (sinceIso) {
+    query = query.gte('closed_at', sinceIso);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    logger.error({ err: error }, 'Failed to fetch closed trades');
+    throw error;
+  }
+  return data;
+}
+
+async function listPositionStates() {
+  const { data, error } = await supabase
+    .from('position_state')
+    .select('*')
+    .order('symbol', { ascending: true });
+
+  if (error) {
+    logger.error({ err: error }, 'Failed to list position_state');
+    throw error;
+  }
+  return data;
+}
+
 module.exports = {
   supabase,
+  listTrades,
+  listRunningTrades,
+  getClosedTradesSince,
+  listPositionStates,
   insertWebhookLog,
   updateWebhookLog,
+  listWebhookLogs,
   insertProcessedAlert,
   getLastAlertForSignal,
   isTradingEnabled,

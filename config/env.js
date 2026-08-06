@@ -22,6 +22,11 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+if (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.trim() === '') {
+  // eslint-disable-next-line no-console
+  console.warn('[config] ADMIN_PASSWORD is not set — the /api admin dashboard routes will be disabled.');
+}
+
 if (!process.env.WEBHOOK_SECRET || process.env.WEBHOOK_SECRET.trim() === '') {
   // eslint-disable-next-line no-console
   console.warn('[config] WEBHOOK_SECRET is not set — the webhook endpoint will accept requests from anyone. Set this before exposing the server publicly.');
@@ -43,6 +48,8 @@ const config = {
   logLevel: process.env.LOG_LEVEL || 'info',
 
   webhookSecret: process.env.WEBHOOK_SECRET || null,
+  adminPassword: process.env.ADMIN_PASSWORD || null,
+  adminAllowedOrigin: process.env.ADMIN_ALLOWED_ORIGIN || null,
 
   supabaseUrl: process.env.SUPABASE_URL,
   supabaseServiceKey: process.env.SUPABASE_SERVICE_KEY,
