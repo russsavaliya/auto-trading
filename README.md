@@ -5,6 +5,27 @@ strategy and places matching paper-trading orders against the **Upstox
 Sandbox API**. Built for safety first: idempotent alert handling, a
 persisted position state machine, an always-on audit log, and a kill switch.
 
+> **Upgrading from before 12 Aug 2026?** Read [RUNBOOK.md](RUNBOOK.md) first —
+> there is a required database migration and the meaning of
+> `trades.entry_price` / `exit_price` has changed.
+
+## Two things to know before you read anything else
+
+**1. The Upstox sandbox never fills orders.** Every order this bridge places
+comes back `status: "open pending"` with `average_price: 0` and
+`filled_quantity: 0`, permanently — confirmed against `/order/retrieve-all`.
+It validates that your payload, instrument token and quantity are correct, but
+nothing executes. P&L is therefore marked against the option's real traded
+price from Upstox's public 1-minute candles, plus a slippage allowance
+(`PAPER_SLIPPAGE_POINTS`). See [services/marketData.js](services/marketData.js).
+The broker's own view is recorded separately in `trades.broker_entry_status`
+so a mark is never mistaken for a fill.
+
+**2. `entry_price` and `exit_price` are OPTION PREMIUM, not the index.** The
+Bank Nifty level lives in `entry_spot` / `exit_spot`. Conflating the two is
+what made every PUT trade record its P&L with the sign inverted before
+migration 001.
+
 ## Project structure
 
 ```
@@ -17,11 +38,37 @@ services/supabaseService.js   All Supabase reads/writes
 services/duplicateCheck.js    Idempotency (alert_id + time-window) logic
 services/positionState.js     FLAT / IN_CALL / IN_PUT state machine helpers
 services/instrumentResolver.js Auto-resolves the ATM instrument_token from price
+services/tradeExecutor.js     Open/close a position — the ONE path both the
+                              webhook and the square-off job go through
+services/marketData.js        Real option premiums (paper-fill pricing)
+services/scheduler.js         Intraday square-off: nothing is carried overnight
 utils/logger.js               pino logger
 utils/retry.js                Generic exponential-backoff retry helper
+utils/marketClock.js          All IST session logic (cutoffs, market hours)
+utils/serialQueue.js          Per-symbol ordering so reversals cannot race
 scripts/find-instrument.js    Manual instrument_token lookup CLI (debugging/override)
+scripts/positions.js          Inspect / close / force-flat a stuck position
+scripts/backfill-premiums.js  Repair historical P&L from real premiums
 sql/schema.sql                Supabase schema — run this first
+sql/migrations/               Incremental migrations — run after schema.sql
 ```
+
+## Intraday session rules
+
+A position opened today is closed today — enforced in two independent places
+so a failure in either still shuts the position:
+
+| Time (IST) | What happens | Enforced by |
+|---|---|---|
+| 14:45 | No new entry accepted | Pine script **and** `routes/webhook.js` |
+| 15:15 | Force exit | Pine script |
+| 15:20 | Force exit (safety net) | `services/scheduler.js` |
+| any | Position opened on an earlier day is closed as soon as the market opens | `services/scheduler.js` |
+
+The server-side rules exist because Pine can only act when a bar closes and
+only when its exit condition is met — if the score never weakens, no exit alert
+is ever produced and the position simply stays open. That is exactly what
+happened during the 6–12 Aug 2026 paper run.
 
 ## 1. Supabase schema
 

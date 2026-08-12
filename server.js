@@ -7,6 +7,8 @@ const webhookRouter = require('./routes/webhook');
 const adminRouter = require('./routes/admin');
 const supabaseService = require('./services/supabaseService');
 const instrumentResolver = require('./services/instrumentResolver');
+const scheduler = require('./services/scheduler');
+const marketClock = require('./utils/marketClock');
 
 const app = express();
 
@@ -29,8 +31,9 @@ app.use('/api', (req, res, next) => {
 app.get('/health', async (req, res) => {
   let reachable = false;
   let tradingEnabled = null;
+  let entriesEnabled = null;
   try {
-    ({ reachable, tradingEnabled } = await supabaseService.getAppConfigStatus());
+    ({ reachable, tradingEnabled, entriesEnabled } = await supabaseService.getAppConfigStatus());
   } catch (err) {
     logger.error({ err: err.message }, 'Health check: failed to reach Supabase');
   }
@@ -38,8 +41,13 @@ app.get('/health', async (req, res) => {
   res.status(reachable ? 200 : 503).json({
     status: reachable ? 'ok' : 'degraded',
     trading_enabled: tradingEnabled,
+    entries_enabled: entriesEnabled,
     db_reachable: reachable,
     sandbox_mode: true,
+    market_open: marketClock.isMarketOpen(Date.now(), config),
+    ist_time: marketClock.istString(),
+    entry_cutoff_ist: config.entryCutoffIst,
+    square_off_ist: config.squareOffIst,
     time: new Date().toISOString(),
   });
 });
@@ -60,11 +68,29 @@ app.use((err, req, res, next) => {
   res.status(500).json({ status: 'error', message: 'Internal server error' });
 });
 
+// Checked before the server accepts anything: if the runtime cannot resolve
+// Asia/Kolkata, every session rule silently applies 5h30m off and no error
+// would ever surface. Better to refuse to start.
+const tz = marketClock.assertTimezoneSupport();
+if (!tz.ok) {
+  logger.error({ rendered: tz.rendered, expected: tz.expected }, `TIMEZONE SUPPORT MISSING — ${tz.detail}`);
+  process.exit(1);
+}
+
 const server = app.listen(config.port, () => {
   logger.info(`TradingView -> Upstox webhook bridge listening on port ${config.port} (${config.nodeEnv})`);
   logger.info(`Sandbox base URL: ${config.upstoxApiBaseUrl}`);
   logger.info(`Webhook endpoint: POST /webhook/tradingview`);
+  logger.info(`IST now ${marketClock.istString()} — entry cutoff ${config.entryCutoffIst}, square-off ${config.squareOffIst}`);
   instrumentResolver.warmUp();
+  supabaseService
+    .verifySchema()
+    .then((r) => {
+      // Only arm the square-off once the schema can actually record a close.
+      if (r.ok) scheduler.start();
+      else logger.error('Square-off scheduler NOT started — fix the schema first, then restart.');
+    })
+    .catch((err) => logger.error({ err: err.message }, 'Schema check failed to run'));
 });
 
 process.on('unhandledRejection', (reason) => {

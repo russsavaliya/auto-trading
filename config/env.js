@@ -75,6 +75,42 @@ const config = {
   tradingEnabledFallback: parseBool(process.env.TRADING_ENABLED, true),
 
   duplicateWindowSeconds: parseIntEnv(process.env.DUPLICATE_WINDOW_SECONDS, 30),
+
+  // --------------------------------------------------------------------------
+  // Intraday session rules (all IST — see utils/marketClock.js).
+  //
+  // These are enforced SERVER-SIDE on purpose. The Pine script also refuses to
+  // emit late entries, but Pine can only act when a bar closes: if no exit
+  // condition is ever met, a position would otherwise sit open indefinitely.
+  // Two positions were carried overnight during the 6-12 Aug paper run, one of
+  // them across a weekend, purely because nothing here forced them shut.
+  // --------------------------------------------------------------------------
+  marketOpenIst: process.env.MARKET_OPEN_IST || '09:15',
+  marketCloseIst: process.env.MARKET_CLOSE_IST || '15:30',
+  // No new position may be opened at/after this time.
+  entryCutoffIst: process.env.ENTRY_CUTOFF_IST || '14:45',
+  // Anything still open at/after this time is force-closed by the scheduler.
+  // Deliberately 5 minutes AFTER the Pine script's own 15:15 square-off: in
+  // normal operation Pine closes the position first and this never fires, so
+  // there is no duplicate exit to reject. This is the safety net for when
+  // TradingView does not deliver (delayed feed, alert expired, chart closed).
+  squareOffIst: process.env.SQUARE_OFF_IST || '15:20',
+  squareOffEnabled: parseBool(process.env.SQUARE_OFF_ENABLED, true),
+  squareOffPollSeconds: parseIntEnv(process.env.SQUARE_OFF_POLL_SECONDS, 60),
+
+  // --------------------------------------------------------------------------
+  // Paper-fill pricing.
+  //
+  // The Upstox sandbox never fills anything (every order stays "open pending"
+  // with average_price 0), so P&L has to be marked against the option's real
+  // traded price. This is the allowance for the bid-ask you would actually have
+  // crossed with a MARKET order — applied against you on BOTH legs.
+  // On BANKNIFTY monthly ATM, 1.5 points at 30 qty is ~₹90 per round trip.
+  // Set to 0 only if you want to see gross, pre-cost results.
+  // --------------------------------------------------------------------------
+  paperSlippagePoints: Number.isFinite(parseFloat(process.env.PAPER_SLIPPAGE_POINTS))
+    ? parseFloat(process.env.PAPER_SLIPPAGE_POINTS)
+    : 1.5,
 };
 
 module.exports = config;

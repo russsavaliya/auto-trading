@@ -126,14 +126,67 @@ async function isTradingEnabled() {
 async function getAppConfigStatus() {
   const { data, error } = await supabase
     .from('app_config')
-    .select('trading_enabled')
+    .select('trading_enabled, entries_enabled')
     .eq('id', 1)
     .maybeSingle();
 
-  if (error || !data) {
-    return { reachable: false, tradingEnabled: null };
+  // entries_enabled arrives with migration 001. Falling back to the narrower
+  // select keeps the health check and the kill switch working on a database
+  // where that migration has not been applied yet, so deploy order does not
+  // matter — verifySchema() below is what tells you to run it.
+  if (error) {
+    const { data: legacy, error: legacyErr } = await supabase
+      .from('app_config')
+      .select('trading_enabled')
+      .eq('id', 1)
+      .maybeSingle();
+    if (legacyErr || !legacy) return { reachable: false, tradingEnabled: null, entriesEnabled: null };
+    return { reachable: true, tradingEnabled: legacy.trading_enabled, entriesEnabled: null };
   }
-  return { reachable: true, tradingEnabled: data.trading_enabled };
+
+  if (!data) return { reachable: false, tradingEnabled: null, entriesEnabled: null };
+  return { reachable: true, tradingEnabled: data.trading_enabled, entriesEnabled: data.entries_enabled };
+}
+
+/**
+ * Confirms the columns migration 001 adds are actually present, at boot,
+ * rather than letting the first real trading signal of the day be the thing
+ * that discovers they are missing. Never throws — the server still starts, but
+ * it says loudly and specifically what to run.
+ */
+async function verifySchema() {
+  const required = ['entry_spot', 'exit_spot', 'entry_fill_source', 'broker_entry_status', 'closed_reason'];
+  const { error } = await supabase.from('trades').select(required.join(', ')).limit(1);
+
+  if (error) {
+    logger.error(
+      { err: error.message },
+      'SCHEMA OUT OF DATE — trades is missing the premium-accounting columns. ' +
+        'Run sql/migrations/001_premium_accounting.sql against your Supabase project NOW. ' +
+        'Until then, entries will fail and P&L will not be recorded.'
+    );
+    return { ok: false, error: error.message };
+  }
+  logger.info('Schema check passed — premium-accounting columns present');
+  return { ok: true };
+}
+
+/**
+ * The narrower switch: pause NEW entries while still letting exits and the
+ * square-off through. Flipping the master trading_enabled off mid-session
+ * would strand whatever is currently open, which is the opposite of what you
+ * want when winding down.
+ *
+ * Fails OPEN (returns true) only when the column is genuinely absent, so a
+ * project that has not run migration 001 yet keeps working unchanged.
+ */
+async function areEntriesEnabled() {
+  const { reachable, entriesEnabled } = await getAppConfigStatus();
+  if (!reachable) {
+    logger.warn('Could not read app_config.entries_enabled — refusing new entries');
+    return false;
+  }
+  return entriesEnabled !== false;
 }
 
 // ----------------------------------------------------------------------------
@@ -184,7 +237,13 @@ async function transitionPositionState({ symbol, expectedState, newState, tradeI
 // trades
 // ----------------------------------------------------------------------------
 
-async function insertTrade({ alertId, signalType, symbol, instrumentToken, quantity, entryPrice, scoreAtEntry }) {
+/**
+ * Opens a trade row. entry_spot is the INDEX level from the alert; the option
+ * premium is not known yet and is written by markTradeOpen once the order has
+ * been placed and priced. Keeping the two apart is the whole point of
+ * migration 001 — conflating them is what inverted every PUT trade's P&L.
+ */
+async function insertTrade({ alertId, signalType, symbol, instrumentToken, quantity, entrySpot, scoreAtEntry }) {
   const { data, error } = await supabase
     .from('trades')
     .insert({
@@ -193,7 +252,7 @@ async function insertTrade({ alertId, signalType, symbol, instrumentToken, quant
       symbol,
       instrument_token: instrumentToken,
       quantity,
-      entry_price: entryPrice,
+      entry_spot: entrySpot,
       score_at_entry: scoreAtEntry,
       status: 'PENDING',
     })
@@ -207,13 +266,27 @@ async function insertTrade({ alertId, signalType, symbol, instrumentToken, quant
   return data.id;
 }
 
-async function markTradeFilled(tradeId, { upstoxOrderId }) {
+/**
+ * Records the entry premium the position is carried at.
+ *
+ * status stays 'FILLED' because that is the value listRunningTrades() and the
+ * admin dashboard already treat as "position is open" — the honest broker
+ * state lives in broker_entry_status, which against the sandbox will read
+ * "open pending" forever since it never executes.
+ */
+async function markTradeOpen(tradeId, { upstoxOrderId, entryPremium, fillSource, brokerStatus }) {
   const { error } = await supabase
     .from('trades')
-    .update({ status: 'FILLED', upstox_order_id: upstoxOrderId })
+    .update({
+      status: 'FILLED',
+      upstox_order_id: upstoxOrderId,
+      entry_price: entryPremium,
+      entry_fill_source: fillSource,
+      broker_entry_status: brokerStatus,
+    })
     .eq('id', tradeId);
 
-  if (error) logger.error({ err: error, tradeId }, 'Failed to mark trade FILLED');
+  if (error) logger.error({ err: error, tradeId }, 'Failed to mark trade open');
 }
 
 async function markTradeFailed(tradeId, { errorMessage }) {
@@ -239,15 +312,25 @@ async function getTradeById(tradeId) {
   return data;
 }
 
-async function closeTrade(tradeId, { exitPrice, scoreAtExit, exitOrderId, pnl }) {
+/**
+ * Closes a trade. pnl is computed by the caller from PREMIUMS
+ * ((exit_price - entry_price) * quantity) — never from spot levels.
+ * closedReason distinguishes a signal exit from a forced square-off, which
+ * matters when reviewing whether the strategy or the clock ended the trade.
+ */
+async function closeTrade(tradeId, { exitPremium, exitSpot, scoreAtExit, exitOrderId, pnl, fillSource, brokerStatus, closedReason }) {
   const { error } = await supabase
     .from('trades')
     .update({
       status: 'CLOSED',
-      exit_price: exitPrice,
+      exit_price: exitPremium,
+      exit_spot: exitSpot,
       score_at_exit: scoreAtExit,
       exit_order_id: exitOrderId,
       pnl,
+      exit_fill_source: fillSource,
+      broker_exit_status: brokerStatus,
+      closed_reason: closedReason,
       closed_at: new Date().toISOString(),
     })
     .eq('id', tradeId);
@@ -329,7 +412,7 @@ async function listRunningTrades() {
 async function getClosedTradesSince(sinceIso) {
   let query = supabase
     .from('trades')
-    .select('id, symbol, signal_type, pnl, quantity, entry_price, exit_price, created_at, closed_at')
+    .select('id, symbol, signal_type, pnl, quantity, entry_price, exit_price, entry_spot, exit_spot, closed_reason, created_at, closed_at')
     .eq('status', 'CLOSED')
     .order('closed_at', { ascending: true });
 
@@ -370,11 +453,13 @@ module.exports = {
   insertProcessedAlert,
   getLastAlertForSignal,
   isTradingEnabled,
+  areEntriesEnabled,
   getAppConfigStatus,
+  verifySchema,
   getPositionState,
   transitionPositionState,
   insertTrade,
-  markTradeFilled,
+  markTradeOpen,
   markTradeFailed,
   getTradeById,
   closeTrade,

@@ -68,4 +68,40 @@ async function placeOrder({ instrumentToken, quantity, transactionType, product,
   );
 }
 
-module.exports = { placeOrder };
+/**
+ * Asks the broker what actually happened to an order.
+ *
+ * IMPORTANT — what this returns against the SANDBOX:
+ * every order placed by this bridge comes back status "open pending" with
+ * average_price 0 and filled_quantity 0, permanently. The sandbox accepts and
+ * validates orders but never executes them. That is why the caller must fall
+ * back to a market mark (services/marketData.js) rather than trusting
+ * average_price, and why a trade is recorded as OPEN rather than FILLED.
+ *
+ * Against the LIVE API this returns a genuine fill and should be preferred
+ * over any mark — the caller already does that.
+ *
+ * Never throws: a failure to read back the order must not undo a position that
+ * the broker may well have accepted.
+ */
+async function getOrderFill(orderId) {
+  try {
+    const response = await client.get('/order/details', { params: { order_id: orderId } });
+    const d = response.data?.data || {};
+    const avg = Number(d.average_price);
+    const filled = Number(d.filled_quantity);
+    const isFilled = Number.isFinite(avg) && avg > 0 && Number.isFinite(filled) && filled > 0;
+
+    return {
+      brokerStatus: d.status || 'unknown',
+      averagePrice: isFilled ? avg : null,
+      filledQuantity: Number.isFinite(filled) ? filled : 0,
+      isFilled,
+    };
+  } catch (err) {
+    logger.warn({ err: err.message, orderId }, 'Could not read back order status from Upstox');
+    return { brokerStatus: 'unreadable', averagePrice: null, filledQuantity: 0, isFilled: false };
+  }
+}
+
+module.exports = { placeOrder, getOrderFill };

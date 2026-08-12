@@ -3,6 +3,7 @@
 const express = require('express');
 const config = require('../config/env');
 const supabaseService = require('../services/supabaseService');
+const marketClock = require('../utils/marketClock');
 const { requireAdminPassword } = require('../middleware/adminAuth');
 
 const router = express.Router();
@@ -73,25 +74,36 @@ router.get('/pnl/summary', async (req, res, next) => {
     const closedTrades = await supabaseService.getClosedTradesSince(null);
     const runningTrades = await supabaseService.listRunningTrades();
 
-    const totalPnl = closedTrades.reduce((sum, t) => sum + (Number(t.pnl) || 0), 0);
-    const wins = closedTrades.filter((t) => Number(t.pnl) > 0).length;
-    const losses = closedTrades.filter((t) => Number(t.pnl) < 0).length;
+    // A trade whose premium could not be determined has pnl = null. It is
+    // excluded from every figure below rather than silently counted as zero,
+    // and surfaced as `unpricedTrades` so a gap in the data can never be
+    // mistaken for a break-even result.
+    const priced = closedTrades.filter((t) => t.pnl !== null && t.pnl !== undefined);
+    const unpriced = closedTrades.length - priced.length;
 
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayPnl = closedTrades
+    const totalPnl = priced.reduce((sum, t) => sum + Number(t.pnl), 0);
+    const wins = priced.filter((t) => Number(t.pnl) > 0).length;
+    const losses = priced.filter((t) => Number(t.pnl) < 0).length;
+
+    const todayStart = new Date(`${marketClock.istDate()}T00:00:00+05:30`);
+    const todayPnl = priced
       .filter((t) => t.closed_at && new Date(t.closed_at) >= todayStart)
-      .reduce((sum, t) => sum + (Number(t.pnl) || 0), 0);
+      .reduce((sum, t) => sum + Number(t.pnl), 0);
+
+    const squaredOff = closedTrades.filter((t) => t.closed_reason && t.closed_reason !== 'signal').length;
 
     res.json({
       status: 'ok',
       totalPnl: Number(totalPnl.toFixed(2)),
       todayPnl: Number(todayPnl.toFixed(2)),
       totalClosedTrades: closedTrades.length,
+      pricedTrades: priced.length,
+      unpricedTrades: unpriced,
+      forceClosedTrades: squaredOff,
       runningTrades: runningTrades.length,
       wins,
       losses,
-      winRate: closedTrades.length ? Number(((wins / closedTrades.length) * 100).toFixed(2)) : 0,
+      winRate: priced.length ? Number(((wins / priced.length) * 100).toFixed(2)) : 0,
     });
   } catch (err) {
     next(err);
