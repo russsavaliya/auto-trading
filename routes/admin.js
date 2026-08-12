@@ -3,6 +3,7 @@
 const express = require('express');
 const config = require('../config/env');
 const supabaseService = require('../services/supabaseService');
+const marketData = require('../services/marketData');
 const marketClock = require('../utils/marketClock');
 const { requireAdminPassword } = require('../middleware/adminAuth');
 
@@ -51,10 +52,46 @@ router.get('/trades', async (req, res, next) => {
   }
 });
 
+/**
+ * Open positions, each marked to the option's current traded price.
+ *
+ * Without the mark the dashboard could only show what you paid, which tells
+ * you nothing about whether the position is currently winning or losing — the
+ * one thing you actually want from a "running trades" view. The mark uses the
+ * same source as the paper-fill pricing, so an open trade and the closed trade
+ * it becomes are valued consistently.
+ *
+ * A failed mark yields nulls rather than an error: a stale price must never
+ * take down the dashboard, and the frontend renders "—" for it.
+ */
 router.get('/trades/running', async (req, res, next) => {
   try {
     const trades = await supabaseService.listRunningTrades();
-    res.json({ status: 'ok', trades });
+
+    const marked = await Promise.all(
+      trades.map(async (t) => {
+        let mark = null;
+        try {
+          mark = t.instrument_token ? await marketData.getPremiumAt(t.instrument_token) : null;
+        } catch {
+          mark = null;
+        }
+
+        const entry = t.entry_price == null ? null : Number(t.entry_price);
+        const current = mark ? mark.premium : null;
+        const unrealizedPnl =
+          entry != null && current != null ? Number(((current - entry) * Number(t.quantity)).toFixed(2)) : null;
+
+        return {
+          ...t,
+          current_premium: current,
+          current_premium_at: mark ? mark.candleAt : null,
+          unrealized_pnl: unrealizedPnl,
+        };
+      })
+    );
+
+    res.json({ status: 'ok', trades: marked });
   } catch (err) {
     next(err);
   }
@@ -110,24 +147,73 @@ router.get('/pnl/summary', async (req, res, next) => {
   }
 });
 
+/**
+ * Buckets closed trades by the IST calendar day/month they closed on.
+ *
+ * The date MUST be derived in IST, not from the server's local timezone. Render
+ * runs in UTC, where a trade closed at 02:30 IST on 1 August carries a
+ * closed_at of 31 July 21:00Z — `d.getMonth()` there files an August trade
+ * under July, and the same slip moves the last ~5.5 hours of every trading day
+ * into the previous day. Nothing about the output looks wrong when it happens.
+ *
+ * Unpriced trades (pnl null — premium could not be determined) are excluded
+ * from both the P&L and the trade count, matching /pnl/summary. Counting them
+ * with pnl coerced to 0 would show a bucket whose trade count disagrees with
+ * the P&L it displays.
+ */
+function bucketClosedTrades(closedTrades, keyLength) {
+  const buckets = new Map();
+
+  for (const t of closedTrades) {
+    if (!t.closed_at) continue;
+    if (t.pnl === null || t.pnl === undefined) continue;
+
+    const key = marketClock.istDate(new Date(t.closed_at).getTime()).slice(0, keyLength);
+    const entry = buckets.get(key) || { key, pnl: 0, trades: 0, wins: 0, losses: 0 };
+    const pnl = Number(t.pnl);
+    entry.pnl += pnl;
+    entry.trades += 1;
+    if (pnl > 0) entry.wins += 1;
+    else if (pnl < 0) entry.losses += 1;
+    buckets.set(key, entry);
+  }
+
+  return Array.from(buckets.values())
+    .map((b) => ({ ...b, pnl: Number(b.pnl.toFixed(2)) }))
+    .sort((a, b) => a.key.localeCompare(b.key));
+}
+
 router.get('/pnl/monthly', async (req, res, next) => {
   try {
     const closedTrades = await supabaseService.getClosedTradesSince(null);
-    const byMonth = new Map();
-
-    for (const t of closedTrades) {
-      const d = new Date(t.closed_at);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      const entry = byMonth.get(key) || { month: key, pnl: 0, trades: 0 };
-      entry.pnl += Number(t.pnl) || 0;
-      entry.trades += 1;
-      byMonth.set(key, entry);
-    }
-
-    const months = Array.from(byMonth.values())
-      .map((m) => ({ ...m, pnl: Number(m.pnl.toFixed(2)) }))
-      .sort((a, b) => a.month.localeCompare(b.month));
+    const months = bucketClosedTrades(closedTrades, 7).map(({ key, ...rest }) => ({ month: key, ...rest }));
     res.json({ status: 'ok', months });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Per-trading-day P&L plus the running cumulative total.
+ *
+ * This exists because monthly buckets are useless at this system's timescale —
+ * a week of trading is a single bar, which is a stat tile pretending to be a
+ * chart. Day granularity is what actually shows whether losses are steady or
+ * concentrated, and `cumulative` is the equity curve.
+ */
+router.get('/pnl/daily', async (req, res, next) => {
+  try {
+    const closedTrades = await supabaseService.getClosedTradesSince(null);
+    const buckets = bucketClosedTrades(closedTrades, 10);
+
+    let running = 0;
+    const days = buckets.map((b) => {
+      running += b.pnl;
+      const { key, ...rest } = b;
+      return { date: key, ...rest, cumulative: Number(running.toFixed(2)) };
+    });
+
+    res.json({ status: 'ok', days });
   } catch (err) {
     next(err);
   }
