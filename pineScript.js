@@ -177,12 +177,23 @@ volContribution = useVolume ? volScore : 0
 totalScore = trendScore + momScore + volContribution
 
 // ===== SESSION CLOCK (IST — NSE trades in Asia/Kolkata) =====
-// time_close is used, not time: the alert fires when the bar CLOSES, so the
-// close time is what the cutoffs must be compared against. A 15:25-15:30 bar
-// has time_close 15:30, which is correctly past both cutoffs.
-istHour = hour(time_close, "Asia/Kolkata")
-istMin  = minute(time_close, "Asia/Kolkata")
-barCloseMin  = istHour * 60 + istMin
+// Derived from `time` (bar OPEN) plus the bar's own length, NOT from
+// `time_close`.
+//
+// WHY: this filter demonstrably failed twice in live running. On 13 Aug a
+// PUT_ENTRY fired off the 14:55-15:00 bar and on 14 Aug off the 15:10-15:15
+// bar — both well past the 14:45 cutoff, both caught only by the server-side
+// guard. `time` is always defined on a confirmed bar, whereas any na in
+// `time_close` would silently make `barCloseMin` na, and in Pine every
+// comparison against na is false — which turns `pastEntryCutoff` off without
+// any visible sign that the filter has stopped working.
+//
+// timeframe.in_seconds() gives the bar length, so this stays correct if the
+// chart is ever moved off 5-minute bars.
+istHour = hour(time, "Asia/Kolkata")
+istMin  = minute(time, "Asia/Kolkata")
+barMinutes   = timeframe.in_seconds() / 60
+barCloseMin  = istHour * 60 + istMin + barMinutes
 entryCutoff  = entryCutoffHour * 60 + entryCutoffMin
 squareOffAt  = squareOffHour * 60 + squareOffMin
 
@@ -302,6 +313,12 @@ buildAlertMsg(_signalType) =>
      ',"timestamp":"' + str.tostring(time) + '"' +
      ',"alert_id":"' + str.tostring(time) + '-' + _signalType + '"' +
      ',"er":' + str.tostring(math.round(efficiencyRatio * 1000) / 1000) +
+     // Diagnostics. The session filter silently failed twice in live running
+     // (entry alerts off the 15:00 and 15:15 bars). Sending what THIS script
+     // believed the time and cutoff state were means the next occurrence is
+     // diagnosable straight from webhook_log, instead of guessed at.
+     ',"bar_close_ist":"' + str.format("{0,number,00}:{1,number,00}", math.floor(barCloseMin / 60), barCloseMin % 60) + '"' +
+     ',"past_cutoff":' + (pastEntryCutoff ? 'true' : 'false') +
      ',"quantity":' + str.tostring(orderQty) + '}'
 
 // Exits are emitted before entries so that on a same-bar reversal TradingView
