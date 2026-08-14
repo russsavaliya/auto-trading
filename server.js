@@ -8,6 +8,7 @@ const adminRouter = require('./routes/admin');
 const supabaseService = require('./services/supabaseService');
 const instrumentResolver = require('./services/instrumentResolver');
 const scheduler = require('./services/scheduler');
+const positionMonitor = require('./services/positionMonitor');
 const marketClock = require('./utils/marketClock');
 
 const app = express();
@@ -86,9 +87,13 @@ const server = app.listen(config.port, () => {
   supabaseService
     .verifySchema()
     .then((r) => {
-      // Only arm the square-off once the schema can actually record a close.
-      if (r.ok) scheduler.start();
-      else logger.error('Square-off scheduler NOT started — fix the schema first, then restart.');
+      // Only arm the exit machinery once the schema can actually record a close.
+      if (r.ok) {
+        scheduler.start();
+        positionMonitor.start();
+      } else {
+        logger.error('Schedulers NOT started — fix the schema first, then restart.');
+      }
     })
     .catch((err) => logger.error({ err: err.message }, 'Schema check failed to run'));
 });

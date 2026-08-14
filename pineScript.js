@@ -34,13 +34,37 @@ indicator("Directional Bias Score (CALL/PUT Lean) with Exit Alerts", overlay=tru
 //    cooldown after an exit so the score oscillating across the threshold
 //    cannot churn in and out. At ~Rs.90 per round trip that churn is expensive.
 //
+// 6. EXITS NO LONGER LIVE HERE (14 Aug 2026). The score cannot book a profit:
+//    it is built from lagging index measures, so the option premium peaks and
+//    fully round-trips before the score decays enough to fire. Over 13-14 Aug,
+//    10 of 12 trades were in profit at some point and Rs.11,064 was handed back
+//    waiting for a score exit — trade 51 was +Rs.1,656 at 12 minutes and closed
+//    at -Rs.18 at 60. The bridge now runs stop-loss / trailing-stop / time-stop
+//    against the PREMIUM (services/positionMonitor.js). The exit alerts below
+//    still fire and act as a backstop; whichever triggers first wins.
+//
+// 7. EFFICIENCY RATIO is now reported with every alert (`er` in the payload) so
+//    the chop-vs-trend regime each signal fired in gets recorded. The filter
+//    itself is OFF by default — see the note on minEfficiencyRatio.
+//
 // STILL UNSOLVED — READ THIS. None of the above gives the strategy an edge.
-// Measured over 6-12 Aug, five minutes after a fresh signal BANKNIFTY had moved
-// in the signalled direction only 29% of the time (a coin flip is ~49%), and
-// the direction was right on just 8 of 24 real trades. Every parameter
-// combination tested still lost money, and so did taking the opposite side of
-// every signal. These changes make the system HONEST and SAFE, not profitable.
-// Treat further live running as data collection, not as trading.
+//
+// The entry signal is anti-predictive, and two independent samples now say so.
+// 6-12 Aug: the index moved in the signalled direction 29% of the time five
+// minutes on, and 8 of 24 trades were the right way round. 13-14 Aug, running
+// THIS version of the script: 3 of 12 at five minutes, 2 of 12 at fifteen,
+// averaging 18-36 index points AGAINST the signal. The cause is structural —
+// the score only reaches |4| once a move is already visible on the chart, which
+// is where these swings exhaust.
+//
+// Inverting the signal is not the fix either. Over all 37 trades from 6-14 Aug
+// the flipped version returns +Rs.1,882 at a 54% hit rate — indistinguishable
+// from zero, and the entire profit comes from two days (13-14 Aug: +Rs.5,382)
+// while the first five days lose Rs.3,500.
+//
+// So: these changes make the system HONEST, SAFE and BOUNDED, not profitable.
+// Keep running it to collect `er`-tagged signals, and treat the real work as
+// replacing the entry — not tuning this one.
 // =============================================================================
 
 // ===== INPUTS =====
@@ -61,6 +85,48 @@ confirmBars    = input.int(1, title="Bars score must hold before entering", minv
 // 1 = wait one bar after any exit. This also blocks same-bar reversals, which
 // were consistently the worst trades in the sample.
 cooldownBars   = input.int(1, title="Cooldown bars after an exit", minval=0, maxval=10, group="Entry / exit")
+
+// The bridge now closes positions on its own, against the option PREMIUM
+// (stop-loss / trailing / time stop in services/positionMonitor.js). This
+// script cannot see that happen — it has no idea what the premium did — so
+// after a server-side exit its inCallPosition/inPutPosition would stay true and
+// it would emit NO further entry until its own score-based exit finally fired.
+// Every setup in that window would be silently skipped.
+//
+// The repair is to re-send the entry periodically while the bias still holds.
+// The bridge keeps the authoritative state machine and accepts the re-assert
+// only when it is genuinely FLAT; if the position is still open it is rejected
+// as "already IN_CALL/IN_PUT", which costs nothing but a log line. That makes
+// the two sides self-healing instead of dependent on staying in lockstep.
+reassertEntries = input.bool(true, title="Re-send entry while bias holds (stays in step after a server-side exit)", group="Entry / exit")
+reassertBars    = input.int(3, title="Re-send every N bars", minval=1, maxval=20, group="Entry / exit")
+
+// ===== REGIME FILTER (measurement first — see note below) =====
+// Kaufman Efficiency Ratio: net move over the last N bars divided by the total
+// path travelled to get there. 1.0 is a straight line (clean trend); near 0
+// means price wandered a long way and ended up nowhere (chop).
+//
+// This matters because the score is a TREND-FOLLOWING measure, and a trend
+// system in a range does exactly what this one has been doing: buying every
+// swing high and selling every swing low. Across 6-14 Aug the median ER at
+// entry was 0.263 — more than half of all signals fired in chop — and those
+// signals were 3/15 correct at the 15-minute mark, averaging -27 index points.
+// Signals in the 0.30-0.50 band were 6/9 correct, averaging +19.7.
+//
+// THAT SPLIT IS A HYPOTHESIS, NOT A RESULT. Nine signals in the good bucket is
+// far too few to act on, and the >0.50 bucket was 0/2, which argues against the
+// simple "more trend is better" story. So minEfficiencyRatio DEFAULTS TO 0 —
+// the filter is off and changes nothing. What IS on is `er` in the alert
+// payload, so every future signal records the regime it fired in and the
+// question can be settled with real data in a few weeks instead of guessed at
+// now. Raise this only once that data says to.
+erLength = input.int(10, title="Efficiency Ratio lookback (bars)", minval=3, group="Regime filter")
+minEfficiencyRatio = input.float(0.0, title="Minimum ER to allow entry (0 = filter OFF)", minval=0.0, maxval=1.0, step=0.05, group="Regime filter")
+
+erNet  = math.abs(close - close[erLength])
+erPath = math.sum(math.abs(close - close[1]), erLength)
+efficiencyRatio = erPath > 0 ? erNet / erPath : 0.0
+regimeOk = efficiencyRatio >= minEfficiencyRatio
 
 useSession      = input.bool(true, title="Enforce intraday session rules", group="Session (IST)")
 entryCutoffHour = input.int(14, title="No new entries at/after — hour",   minval=9, maxval=15, group="Session (IST)")
@@ -139,6 +205,7 @@ putConfirmed  = putStreak  >= confirmBars
 var bool inCallPosition = false
 var bool inPutPosition  = false
 var int  lastExitBar    = na
+var int  lastEntryBar   = na
 
 // ===== EXIT CONDITIONS =====
 // Computed BEFORE the entry block below mutates the position flags. On a
@@ -161,7 +228,7 @@ if exitPutSignal
 // still lands in the correct new state (subject to the cooldown).
 flatNow    = not inCallPosition and not inPutPosition
 cooledDown = na(lastExitBar) or (bar_index - lastExitBar) >= cooldownBars
-canEnterNow = flatNow and cooledDown and not pastEntryCutoff and not mustSquareOff
+canEnterNow = flatNow and cooledDown and not pastEntryCutoff and not mustSquareOff and regimeOk
 
 enterCall = canEnterNow and callConfirmed
 enterPut  = canEnterNow and putConfirmed and not enterCall
@@ -169,9 +236,19 @@ enterPut  = canEnterNow and putConfirmed and not enterCall
 if enterCall
     inCallPosition := true
     inPutPosition  := false
+    lastEntryBar   := bar_index
 if enterPut
     inPutPosition  := true
     inCallPosition := false
+    lastEntryBar   := bar_index
+
+// ===== RE-ASSERT (keeps this script in step with the server) =====
+// See the note beside the reassertEntries input above for why this exists.
+barsSinceEntry = na(lastEntryBar) ? na : bar_index - lastEntryBar
+canReassert = reassertEntries and not na(barsSinceEntry) and barsSinceEntry > 0 and barsSinceEntry % reassertBars == 0 and not pastEntryCutoff and not mustSquareOff and regimeOk
+
+reassertCall = canReassert and inCallPosition and strongCall and not exitCallSignal
+reassertPut  = canReassert and inPutPosition  and strongPut  and not exitPutSignal
 
 // ===== VISUALS =====
 plot(emaFast, color=color.new(color.blue, 0),  title="Fast EMA")
@@ -188,7 +265,7 @@ plotshape(exitCallSignal, style=shape.xcross, location=location.abovebar, color=
 plotshape(exitPutSignal,  style=shape.xcross, location=location.belowbar, color=color.orange, text="EXIT", textcolor=color.white, size=size.tiny)
 
 // ===== SCORE TABLE (top-right) =====
-var table t = table.new(position.top_right, 2, 7, border_width=1)
+var table t = table.new(position.top_right, 2, 8, border_width=1)
 if barstate.islast
     table.cell(t, 0, 0, "Component", bgcolor=color.gray, text_color=color.white)
     table.cell(t, 1, 0, "Score",     bgcolor=color.gray, text_color=color.white)
@@ -204,6 +281,8 @@ if barstate.islast
     table.cell(t, 1, 5, inCallPosition ? "IN CALL" : inPutPosition ? "IN PUT" : "FLAT", text_color=color.white, bgcolor=inCallPosition ? color.green : inPutPosition ? color.red : color.gray)
     table.cell(t, 0, 6, "Session")
     table.cell(t, 1, 6, mustSquareOff ? "SQUARE OFF" : pastEntryCutoff ? "NO NEW ENTRY" : "OPEN", text_color=color.white, bgcolor=mustSquareOff ? color.red : pastEntryCutoff ? color.orange : color.green)
+    table.cell(t, 0, 7, "Efficiency")
+    table.cell(t, 1, 7, str.tostring(efficiencyRatio, "#.##") + (minEfficiencyRatio > 0 ? (regimeOk ? " ok" : " BLOCKED") : " (log only)"), text_color=color.white, bgcolor=efficiencyRatio >= 0.30 ? color.green : efficiencyRatio >= 0.15 ? color.orange : color.red)
 
 // ===== ALERTS (static — for manual watching, unrelated to the webhook) =====
 alertcondition(enterCall, title="CALL Bias Alert", message="Strong CALL-side bias detected")
@@ -222,6 +301,7 @@ buildAlertMsg(_signalType) =>
      ',"score":' + str.tostring(totalScore) +
      ',"timestamp":"' + str.tostring(time) + '"' +
      ',"alert_id":"' + str.tostring(time) + '-' + _signalType + '"' +
+     ',"er":' + str.tostring(math.round(efficiencyRatio * 1000) / 1000) +
      ',"quantity":' + str.tostring(orderQty) + '}'
 
 // Exits are emitted before entries so that on a same-bar reversal TradingView
@@ -234,4 +314,12 @@ if exitPutSignal
 if enterCall
     alert(buildAlertMsg("CALL_ENTRY"), alert.freq_once_per_bar_close)
 if enterPut
+    alert(buildAlertMsg("PUT_ENTRY"), alert.freq_once_per_bar_close)
+
+// Re-assertions carry the identical payload shape, so the bridge treats them
+// as ordinary entries and its state machine decides. alert_id embeds bar time,
+// so each re-send is a distinct id and is not swallowed as a duplicate.
+if reassertCall
+    alert(buildAlertMsg("CALL_ENTRY"), alert.freq_once_per_bar_close)
+if reassertPut
     alert(buildAlertMsg("PUT_ENTRY"), alert.freq_once_per_bar_close)

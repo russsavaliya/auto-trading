@@ -63,7 +63,44 @@ async function currentSpot(symbol) {
  * compare-and-swap) before the broker is called, so a second concurrent signal
  * loses the CAS instead of stacking a second position.
  */
+/**
+ * Blocks an immediate re-entry after a risk rule closed the last position.
+ *
+ * Needed because the Pine script re-sends its entry every few bars while the
+ * bias holds (so it stays in step after a server-side exit it cannot see). On
+ * its own that is fine — but if a stop-loss just fired while the score is still
+ * strong, the very next re-assert walks straight back into the same losing
+ * trade, and again after the next stop. That is a revenge-trading loop that
+ * would turn one bad read into four.
+ *
+ * A signal-driven exit does NOT trigger this: if the strategy changed its mind
+ * and then changed it back, that is a genuine new setup.
+ */
+const RULE_EXITS = new Set(['stop_loss', 'trailing_stop', 'time_stop']);
+
+async function blockedByRecentRuleExit(symbol, signalType) {
+  if (config.reEntryCooldownMinutes <= 0) return null;
+
+  const last = await supabaseService.getLastClosedTrade(symbol);
+  if (!last || !RULE_EXITS.has(last.closed_reason)) return null;
+
+  // Only the same direction is blocked — a genuine reversal is still allowed.
+  const sameSide = String(last.signal_type).slice(0, 4) === String(signalType).slice(0, 4);
+  if (!sameSide) return null;
+
+  const minutesSince = (Date.now() - new Date(last.closed_at).getTime()) / 60000;
+  if (minutesSince >= config.reEntryCooldownMinutes) return null;
+
+  return `re_entry_cooldown: ${last.closed_reason} on trade ${last.id} ${minutesSince.toFixed(0)}m ago (need ${config.reEntryCooldownMinutes}m)`;
+}
+
 async function openPosition({ alertId, signalType, symbol, spot, score, quantity, product, orderType, instrumentToken }) {
+  const cooldown = await blockedByRecentRuleExit(symbol, signalType);
+  if (cooldown) {
+    logger.warn({ symbol, signalType, cooldown }, 'Entry refused: cooling off after a risk-rule exit');
+    return { ok: false, reason: cooldown };
+  }
+
   let token = instrumentToken;
 
   if (!token) {

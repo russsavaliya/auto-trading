@@ -1,3 +1,44 @@
+# Runbook
+
+## 14 Aug 2026 — profit booking (do this first)
+
+**Step A.** Supabase SQL Editor mein `sql/migrations/002_position_monitor.sql`
+chalao. Ye `trades.peak_premium` column add karta hai.
+
+**Step B.** Naya code deploy karo. Restart pe log mein dikhna chahiye:
+
+```
+Schema check passed
+Square-off scheduler started
+Premium exit monitor started   {stopLossPct: 0.1, trailArmPct: 0.03, trailPct: 0.05, maxHoldMinutes: 30}
+```
+
+Agar `SCHEMA OUT OF DATE` aaye to Step A nahi chali.
+
+**Pine script badalne ki zarurat nahi.** Exit rules server pe chalte hain aur
+premium dekhte hain, index score nahi. Pine ka exit signal backstop ke taur pe
+kaam karta rahega — jo pehle fire kare wahi jeetega.
+
+### Kya badla
+
+| Rule | Default | Kya karta hai |
+|---|---|---|
+| `STOP_LOSS_PCT` | 10% | Premium entry se 10% neeche gaya to turant exit |
+| `TRAIL_ARM_PCT` | 3% | Trailing stop tab tak band jab tak 3% profit na ho |
+| `TRAIL_PCT` | 5% | Arm hone ke baad, peak se 5% wapas aaya to exit |
+| `MAX_HOLD_MINUTES` | 30 | 30 min me kuch nahi hua to nikal jao |
+
+Trade 51 pe ye rule **+₹720 book** karta, −₹18 ki jagah.
+
+### Expectation set kar lo
+
+37 trades (6-14 Aug) pe conservative backtest: **−₹13,061 → −₹7,612**.
+Behtar hai, **par abhi bhi loss hai**. Ye rules nuksan ko **bound** karte hain,
+edge nahi dete. Entry signal ka problem alag hai — details neeche
+"Ab kya expect karna hai" section mein.
+
+---
+
 # Runbook — 12 Aug 2026 fixes
 
 Ye doc batata hai ki **tumhe manually kya karna hai**. Code side ka kaam ho

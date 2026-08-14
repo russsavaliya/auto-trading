@@ -155,15 +155,15 @@ async function getAppConfigStatus() {
  * it says loudly and specifically what to run.
  */
 async function verifySchema() {
-  const required = ['entry_spot', 'exit_spot', 'entry_fill_source', 'broker_entry_status', 'closed_reason'];
+  const required = ['entry_spot', 'exit_spot', 'entry_fill_source', 'broker_entry_status', 'closed_reason', 'peak_premium'];
   const { error } = await supabase.from('trades').select(required.join(', ')).limit(1);
 
   if (error) {
     logger.error(
       { err: error.message },
-      'SCHEMA OUT OF DATE — trades is missing the premium-accounting columns. ' +
-        'Run sql/migrations/001_premium_accounting.sql against your Supabase project NOW. ' +
-        'Until then, entries will fail and P&L will not be recorded.'
+      'SCHEMA OUT OF DATE — trades is missing required columns. ' +
+        'Run every file in sql/migrations/ against your Supabase project NOW (001 then 002). ' +
+        'Until then, entries will fail, P&L will not be recorded, and the exit rules will not run.'
     );
     return { ok: false, error: error.message };
   }
@@ -395,6 +395,39 @@ async function listTrades({ status, limit = 50, offset = 0 } = {}) {
   return { trades: data, total: count };
 }
 
+/**
+ * Records a new high-water mark for the trailing stop. Persisted rather than
+ * kept in memory so a restart mid-position cannot reset the peak to the entry
+ * price and silently disarm the trail.
+ */
+async function updatePeakPremium(tradeId, peakPremium) {
+  const { error } = await supabase
+    .from('trades')
+    .update({ peak_premium: peakPremium })
+    .eq('id', tradeId);
+
+  if (error) logger.error({ err: error, tradeId }, 'Failed to update peak_premium');
+}
+
+/** Most recently closed trade for a symbol — drives the re-entry cooldown. */
+async function getLastClosedTrade(symbol) {
+  const { data, error } = await supabase
+    .from('trades')
+    .select('id, signal_type, closed_reason, closed_at, pnl')
+    .eq('symbol', symbol)
+    .eq('status', 'CLOSED')
+    .not('closed_at', 'is', null)
+    .order('closed_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    logger.error({ err: error, symbol }, 'Failed to read last closed trade');
+    return null;
+  }
+  return data;
+}
+
 async function listRunningTrades() {
   const { data, error } = await supabase
     .from('trades')
@@ -460,6 +493,8 @@ module.exports = {
   transitionPositionState,
   insertTrade,
   markTradeOpen,
+  updatePeakPremium,
+  getLastClosedTrade,
   markTradeFailed,
   getTradeById,
   closeTrade,

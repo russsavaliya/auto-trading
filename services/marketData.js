@@ -34,7 +34,14 @@ const LIVE_HOST = 'https://api.upstox.com';
 // free correctness-wise and keeps a burst of signals from re-downloading the
 // same day. Keyed by instrument+date; the entry for "today" is short-lived.
 const cache = new Map();
-const TODAY_TTL_MS = 45 * 1000;
+
+// Today's candles must expire faster than the position monitor polls, or the
+// stop-loss ends up acting on a stale quote. At the old 45s TTL against a 30s
+// poll, roughly every other check re-used cached data — and stacked on top of
+// the 1-minute candle granularity that put the price the stop reacted to as
+// much as 105 seconds behind the market. 10s keeps the cache useful for bursts
+// of signals without ever being the reason a stop fires late.
+const TODAY_TTL_MS = 10 * 1000;
 
 function cacheGet(key, isToday) {
   const hit = cache.get(key);

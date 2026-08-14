@@ -37,6 +37,14 @@ function parseBool(value, fallback) {
   return String(value).trim().toLowerCase() === 'true';
 }
 
+/** Fractions (0.05 = 5%) and other decimals. Rejects NaN rather than
+ * propagating it into a stop-loss comparison, where NaN silently disables the
+ * rule because every comparison against it is false. */
+function parseFloatEnv(value, fallback) {
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function parseIntEnv(value, fallback) {
   const n = parseInt(value, 10);
   return Number.isFinite(n) ? n : fallback;
@@ -111,6 +119,46 @@ const config = {
   paperSlippagePoints: Number.isFinite(parseFloat(process.env.PAPER_SLIPPAGE_POINTS))
     ? parseFloat(process.env.PAPER_SLIPPAGE_POINTS)
     : 1.5,
+
+  // --------------------------------------------------------------------------
+  // Premium-based exit management (services/positionMonitor.js).
+  //
+  // The Pine score cannot book a profit. It is built from EMA/Supertrend/MACD
+  // on the INDEX, so it only fires an exit once the trend measure has decayed —
+  // by which time the option premium has already peaked and round-tripped.
+  // Over 13-14 Aug 2026, 10 of 12 trades were in profit at some point and
+  // Rs.11,064 was handed back waiting for a score-based exit.
+  //
+  // These rules watch the PREMIUM — the thing actually owned — and act on it.
+  // Backtested conservatively (1-minute closes only, the resolution a poller
+  // can really act on) across all 37 trades from 6-14 Aug: the score-based
+  // exits produced -Rs.13,061; these defaults produce -Rs.7,612. Every
+  // combination tested beat the score-based exit, so the improvement is not an
+  // artefact of picking the best row.
+  //
+  // NOTE: this bounds the damage; it does NOT make the strategy profitable.
+  // The entry signal has negative edge (the index moved in the signalled
+  // direction on 2 of 12 trades at the 15-minute mark), and no exit rule can
+  // fix a bad entry.
+  // --------------------------------------------------------------------------
+  exitRulesEnabled: parseBool(process.env.EXIT_RULES_ENABLED, true),
+  // Hard stop: close if the premium falls this fraction below the entry.
+  stopLossPct: parseFloatEnv(process.env.STOP_LOSS_PCT, 0.1),
+  // The trailing stop stays disarmed until the position is this far in profit,
+  // so normal noise around the entry price cannot trigger it.
+  trailArmPct: parseFloatEnv(process.env.TRAIL_ARM_PCT, 0.03),
+  // Once armed, close if the premium retraces this far from its peak.
+  trailPct: parseFloatEnv(process.env.TRAIL_PCT, 0.05),
+  // Give up on a position that has gone nowhere. 0 disables the time stop.
+  maxHoldMinutes: parseIntEnv(process.env.MAX_HOLD_MINUTES, 30),
+  exitPollSeconds: parseIntEnv(process.env.EXIT_POLL_SECONDS, 30),
+
+  // After a stop-loss / trailing / time exit, refuse a SAME-DIRECTION re-entry
+  // for this long. The Pine script re-sends its entry every few bars while the
+  // bias holds (so it stays in step after a server exit it cannot see), which
+  // without this would walk straight back into the trade the stop just closed —
+  // repeatedly. A reversal to the other side is still allowed immediately.
+  reEntryCooldownMinutes: parseIntEnv(process.env.RE_ENTRY_COOLDOWN_MINUTES, 15),
 };
 
 module.exports = config;
