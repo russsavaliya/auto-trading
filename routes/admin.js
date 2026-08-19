@@ -27,6 +27,38 @@ router.post('/login', (req, res) => {
 
 router.use(requireAdminPassword);
 
+/**
+ * Backs the header toggle on the dashboard. Reads app_config fresh (same path
+ * as the trading kill switch itself), so the toggle always reflects reality
+ * even if trading_enabled was flipped directly in Supabase.
+ */
+router.get('/config', async (req, res, next) => {
+  try {
+    const { reachable, tradingEnabled } = await supabaseService.getAppConfigStatus();
+    if (!reachable) {
+      res.status(503).json({ status: 'error', message: 'Could not read app_config' });
+      return;
+    }
+    res.json({ status: 'ok', trading_enabled: tradingEnabled });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch('/config', async (req, res, next) => {
+  try {
+    const { trading_enabled: tradingEnabled } = req.body || {};
+    if (typeof tradingEnabled !== 'boolean') {
+      res.status(400).json({ status: 'error', message: 'trading_enabled must be a boolean' });
+      return;
+    }
+    const updated = await supabaseService.setTradingEnabled(tradingEnabled);
+    res.json({ status: 'ok', trading_enabled: updated.trading_enabled });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/webhook-logs', async (req, res, next) => {
   try {
     const { processed: processedRaw, limit: limitRaw, offset: offsetRaw } = req.query;

@@ -172,6 +172,27 @@ async function verifySchema() {
 }
 
 /**
+ * Flips the kill switch from the admin dashboard. Writes straight through to
+ * Supabase — no in-memory cache — so the same guarantee as isTradingEnabled()
+ * applies in reverse: the very next webhook after this resolves sees the new
+ * value.
+ */
+async function setTradingEnabled(enabled) {
+  const { data, error } = await supabase
+    .from('app_config')
+    .update({ trading_enabled: enabled, updated_at: new Date().toISOString() })
+    .eq('id', 1)
+    .select('trading_enabled')
+    .single();
+
+  if (error) {
+    logger.error({ err: error }, 'Failed to update app_config.trading_enabled');
+    throw new Error('Failed to update trading_enabled');
+  }
+  return data;
+}
+
+/**
  * The narrower switch: pause NEW entries while still letting exits and the
  * square-off through. Flipping the master trading_enabled off mid-session
  * would strand whatever is currently open, which is the opposite of what you
@@ -486,6 +507,7 @@ module.exports = {
   insertProcessedAlert,
   getLastAlertForSignal,
   isTradingEnabled,
+  setTradingEnabled,
   areEntriesEnabled,
   getAppConfigStatus,
   verifySchema,
