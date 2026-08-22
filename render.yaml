@@ -52,6 +52,14 @@ services:
       # deliberately want gross, pre-cost numbers.
       - key: PAPER_SLIPPAGE_POINTS
         value: "1.5"
+
+      # Daily trade cap. Per-trade expectancy is measurably negative in two
+      # independent samples, so capping trade count is the one rule that holds
+      # regardless of which patterns turn out to be real. Details and the
+      # measured numbers are in config/env.js beside maxTradesPerDay.
+      - key: MAX_TRADES_PER_DAY
+        value: "2"
+
       # Secrets — Render will prompt for these during Blueprint setup rather
       # than storing a value here (sync: false = "no value in this file").
       - key: WEBHOOK_SECRET

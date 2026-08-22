@@ -159,6 +159,35 @@ const config = {
   // without this would walk straight back into the trade the stop just closed —
   // repeatedly. A reversal to the other side is still allowed immediately.
   reEntryCooldownMinutes: parseIntEnv(process.env.RE_ENTRY_COOLDOWN_MINUTES, 15),
+
+  // --------------------------------------------------------------------------
+  // Daily trade cap. 0 disables it.
+  //
+  // This is the single most robust rule in the whole dataset, and it does not
+  // depend on any pattern being real. Both independent measurements say the
+  // per-trade expectancy is NEGATIVE (-Rs.155/trade live over 57 trades;
+  // -17.84/trade in TradingView's own Feb-Aug backtest, profit factor 0.516).
+  // When expectancy is negative, fewer trades is better arithmetically — no
+  // amount of data-mining can make that conclusion wrong.
+  //
+  // The measured effect is monotonic in BOTH windows, which is much harder to
+  // get by chance than a single lucky cell:
+  //
+  //                      6-21 Aug (57 trades)   17-21 Aug (20 trades)
+  //   no cap                   -Rs.8,859              +Rs.4,202
+  //   max 3/day                -Rs.4,545              +Rs.4,368
+  //   max 2/day                +Rs.  795              +Rs.5,459
+  //   max 1/day                +Rs.5,444              +Rs.7,770
+  //
+  // 2 is chosen over 1 deliberately: 1/day is the extreme end of the sweep and
+  // the most likely to be over-fit, and it would yield only ~20 trades a month
+  // to learn from. 2 keeps a safety margin and collects twice the evidence.
+  //
+  // Stopping the day after a win is handled MANUALLY via the dashboard kill
+  // switch, not here — it tests the same (+Rs.3,116 / +Rs.6,777) and leaving it
+  // manual keeps a human in the loop on the day's outcome.
+  // --------------------------------------------------------------------------
+  maxTradesPerDay: parseIntEnv(process.env.MAX_TRADES_PER_DAY, 2),
 };
 
 module.exports = config;

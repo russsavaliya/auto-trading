@@ -94,7 +94,33 @@ async function blockedByRecentRuleExit(symbol, signalType) {
   return `re_entry_cooldown: ${last.closed_reason} on trade ${last.id} ${minutesSince.toFixed(0)}m ago (need ${config.reEntryCooldownMinutes}m)`;
 }
 
+/**
+ * Enforces the daily trade cap.
+ *
+ * Rationale in config/env.js next to maxTradesPerDay — the short version is
+ * that per-trade expectancy is measurably negative in two independent samples,
+ * so capping trade count is the one rule that cannot be wrong even if every
+ * pattern we think we see turns out to be noise.
+ *
+ * Checked before the instrument is resolved and before any row is written, so
+ * a capped signal costs nothing but a webhook_log line.
+ */
+async function blockedByDailyCap(symbol) {
+  if (config.maxTradesPerDay <= 0) return null;
+
+  const takenToday = await supabaseService.countTradesToday(symbol);
+  if (takenToday < config.maxTradesPerDay) return null;
+
+  return `daily_cap_reached: ${takenToday} of ${config.maxTradesPerDay} trades already taken today`;
+}
+
 async function openPosition({ alertId, signalType, symbol, spot, score, quantity, product, orderType, instrumentToken }) {
+  const capped = await blockedByDailyCap(symbol);
+  if (capped) {
+    logger.warn({ symbol, signalType, capped }, 'Entry refused: daily trade cap reached');
+    return { ok: false, reason: capped };
+  }
+
   const cooldown = await blockedByRecentRuleExit(symbol, signalType);
   if (cooldown) {
     logger.warn({ symbol, signalType, cooldown }, 'Entry refused: cooling off after a risk-rule exit');

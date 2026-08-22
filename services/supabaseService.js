@@ -3,6 +3,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const config = require('../config/env');
 const logger = require('../utils/logger');
+const marketClock = require('../utils/marketClock');
 
 const supabase = createClient(config.supabaseUrl, config.supabaseServiceKey, {
   auth: { persistSession: false },
@@ -430,6 +431,37 @@ async function updatePeakPremium(tradeId, peakPremium) {
   if (error) logger.error({ err: error, tradeId }, 'Failed to update peak_premium');
 }
 
+/**
+ * How many positions this symbol has already opened today, in IST.
+ *
+ * FAILED rows are excluded on purpose: insertTrade() writes the row before the
+ * broker is called, so a rejected order leaves a row behind that never became
+ * a position. Counting those against the daily cap would silently burn the
+ * day's allowance on trades that never happened.
+ *
+ * The day boundary must be IST, not the server's local midnight — Render runs
+ * in UTC, where "today" starts at 05:30 IST and the first 5.5 hours of every
+ * session would be counted against the previous day.
+ */
+async function countTradesToday(symbol) {
+  const startOfDayIst = new Date(`${marketClock.istDate()}T00:00:00+05:30`).toISOString();
+
+  const { count, error } = await supabase
+    .from('trades')
+    .select('id', { count: 'exact', head: true })
+    .eq('symbol', symbol)
+    .in('status', ['PENDING', 'FILLED', 'CLOSED'])
+    .gte('created_at', startOfDayIst);
+
+  if (error) {
+    // Fail CLOSED: if the count cannot be read we do not know how many trades
+    // have already run, and quietly allowing another one is the riskier guess.
+    logger.error({ err: error, symbol }, 'Failed to count today\'s trades — treating the daily cap as reached');
+    return Number.POSITIVE_INFINITY;
+  }
+  return count ?? 0;
+}
+
 /** Most recently closed trade for a symbol — drives the re-entry cooldown. */
 async function getLastClosedTrade(symbol) {
   const { data, error } = await supabase
@@ -516,6 +548,7 @@ module.exports = {
   insertTrade,
   markTradeOpen,
   updatePeakPremium,
+  countTradesToday,
   getLastClosedTrade,
   markTradeFailed,
   getTradeById,
