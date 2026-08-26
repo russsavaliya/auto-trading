@@ -1,16 +1,12 @@
 'use strict';
 
-const express = require('express');
 const config = require('../config/env');
 const logger = require('../utils/logger');
-const validateWebhook = require('../middleware/validateWebhook');
 const supabaseService = require('../services/supabaseService');
 const duplicateCheck = require('../services/duplicateCheck');
 const tradeExecutor = require('../services/tradeExecutor');
 const serialQueue = require('../utils/serialQueue');
 const marketClock = require('../utils/marketClock');
-
-const router = express.Router();
 
 const ENTRY_SIGNALS = new Set(['CALL_ENTRY', 'PUT_ENTRY']);
 const EXIT_SIGNALS = new Set(['CALL_EXIT', 'PUT_EXIT']);
@@ -117,7 +113,7 @@ async function processInBackground(webhookLogId, payload) {
   }
 }
 
-router.post('/tradingview', validateWebhook, (req, res) => {
+function handleTradingViewAlert(req, res) {
   // Ack immediately — validateWebhook has already persisted the webhook_log
   // row, so the call is durably recorded even if everything below crashes.
   res.status(200).json({ status: 'received', webhook_log_id: req.webhookLogId });
@@ -130,6 +126,6 @@ router.post('/tradingview', validateWebhook, (req, res) => {
     .catch((err) => {
       logger.error({ err: err.message, stack: err.stack }, 'processInBackground rejected unexpectedly');
     });
-});
+}
 
-module.exports = router;
+module.exports = { handleTradingViewAlert };

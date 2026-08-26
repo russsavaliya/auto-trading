@@ -5,8 +5,8 @@
 // 37 live trades every conclusion currently rests on.
 
 require('dotenv').config();
-const { supabase } = require('../services/supabaseService');
-const mc = require('../utils/marketClock');
+const { supabase } = require('../src/services/supabaseService');
+const mc = require('../src/utils/marketClock');
 const axios = require('axios');
 
 const KEY = encodeURIComponent('NSE_INDEX|Nifty Bank');

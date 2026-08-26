@@ -32,7 +32,7 @@ Upstox Sandbox API (paper trade order place)
 5. **Upstox Sandbox integration** — sandbox=true mode, retry logic (max 2 retries, exponential backoff) transient failures ke liye.
 6. **Trade logging** — `trades` table (entry/exit price, score, order_id, status, pnl) + `webhook_log` table (har incoming webhook, duplicate/reject bhi) Supabase mein.
 7. **Kill switch** — Supabase `app_config.trading_enabled` flag se turant pause kar sakte hain naye orders ko, bina redeploy kiye. `.env` ka `TRADING_ENABLED` sirf fallback hai agar Supabase read fail ho jaye.
-8. **Structure** — separated files: `server.js`, `routes/webhook.js`, `services/upstoxService.js`, `services/supabaseService.js`, `services/duplicateCheck.js`, `services/positionState.js`, `middleware/validateWebhook.js`, `config/env.js`.
+8. **Structure** — separated files: `server.js`, `src/app.js`, `src/routes/*.routes.js`, `src/controllers/*.controller.js`, `src/services/upstoxService.js`, `src/services/supabaseService.js`, `src/services/duplicateCheck.js`, `src/services/positionState.js`, `src/middlewares/validateWebhook.js`, `src/config/env.js`.
 
 ## Env Variables Needed (values fill karni hain, agent ko mat batana actual values)
 - `WEBHOOK_SECRET` — khud generate karna hai (`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`), TradingView alert URL mein `?token=...` se bhejna hai.

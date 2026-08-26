@@ -18,10 +18,10 @@
  */
 
 require('dotenv').config();
-const config = require('../config/env');
-const { supabase } = require('../services/supabaseService');
-const marketData = require('../services/marketData');
-const { istString } = require('../utils/marketClock');
+const config = require('../src/config/env');
+const { supabase } = require('../src/services/supabaseService');
+const marketData = require('../src/services/marketData');
+const { istString } = require('../src/utils/marketClock');
 
 const APPLY = process.argv.includes('--apply');
 

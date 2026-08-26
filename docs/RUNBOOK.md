@@ -140,7 +140,7 @@ nahi karta, isliye sirf emergency mein.
 
 ## Step 4 — Pine script TradingView pe update karo
 
-`pineScript.js` ki poori file copy karke TradingView Pine editor mein purani
+`strategy/pineScript.js` ki poori file copy karke TradingView Pine editor mein purani
 script replace kar do, phir **Save** aur **Add to chart**.
 
 Naye inputs (defaults already set hain, chhedne ki zarurat nahi):

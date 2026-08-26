@@ -2,7 +2,7 @@
 
 **Date:** 20 August 2026, ~18:10 IST
 **Prepared by:** Claude (Senior Dev + Market-behaviour review), Rushabh ke liye
-**Scope:** Poore Supabase database (`trades`, `webhook_log`, `app_config`, `position_state`) ka fresh query kar ke, real Upstox market data (jo `services/marketData.js` already live Upstox candle API se leta hai) ke against verify kiya. Ye RUNBOOK.md (12-14 Aug) ke baad ka naya data hai — us doc mein 37 trades tak ka analysis tha, ab DB mein **61 trades** hain.
+**Scope:** Poore Supabase database (`trades`, `webhook_log`, `app_config`, `position_state`) ka fresh query kar ke, real Upstox market data (jo `src/services/marketData.js` already live Upstox candle API se leta hai) ke against verify kiya. Ye RUNBOOK.md (12-14 Aug) ke baad ka naya data hai — us doc mein 37 trades tak ka analysis tha, ab DB mein **61 trades** hain.
 
 ---
 
@@ -70,11 +70,11 @@ All-time wala gap bahut zyada dramatic hai, lekin **isko face value pe mat lo** 
 
 ### 2.4 Ek cheez jo turant check karni chahiye: Pine script version mismatch
 
-`pineScript.js` mein `er` (Efficiency Ratio) field har alert ke saath bhejta hai (line 315 dekho). Lekin DB mein ye field **sirf aaj (20 Aug) se aa raha hai** — 17, 18, 19 Aug ke saare alerts mein `er` field hi missing hai (`undefined`).
+`strategy/pineScript.js` mein `er` (Efficiency Ratio) field har alert ke saath bhejta hai (line 315 dekho). Lekin DB mein ye field **sirf aaj (20 Aug) se aa raha hai** — 17, 18, 19 Aug ke saare alerts mein `er` field hi missing hai (`undefined`).
 
 Iska matlab: **TradingView chart pe jo script live tha 17-19 Aug ko, wo isse purana version tha** — shayad `er` field add hone se pehle ka. Ho sakta hai baaki sab logic same ho (entry/exit thresholds waghera), lekin ye confirm karna zaroori hai:
 
-**Action:** Ab TradingView Pine editor khol ke check karo ki jo script chart pe "Added to chart" hai wo **hu-ba-hu** `pineScript.js` (is repo ka latest version) ke saath match karta hai. Agar nahi, to Save + Add to chart dobara karo (RUNBOOK Step 4 jaisa). Chhota sa cheez hai lekin agar production mein aisa hua to purane parameters silently chalte rahenge bina pata chale.
+**Action:** Ab TradingView Pine editor khol ke check karo ki jo script chart pe "Added to chart" hai wo **hu-ba-hu** `strategy/pineScript.js` (is repo ka latest version) ke saath match karta hai. Agar nahi, to Save + Add to chart dobara karo (RUNBOOK Step 4 jaisa). Chhota sa cheez hai lekin agar production mein aisa hua to purane parameters silently chalte rahenge bina pata chale.
 
 ---
 
@@ -104,9 +104,9 @@ Tumne market-trap experience ke baare mein poocha, to seedha is data se jo dikh 
 
 ### Priority 1 — Backtest tool jo already ban chuka hai, use hi nahi hua abhi tak
 
-`pineStrategy.js` (root mein) exactly isi sawaal ke liye bana hai: "kya ye score 6-12 mahine ke real history pe paisa banata hai" — bina hafto wait kiye seconds mein pata chal sakta hai. File ke apne comments (lines 20-24) kehte hain ki ye 37 live trades ka sample bahut chhota hai.
+`strategy/pineStrategy.js` exactly isi sawaal ke liye bana hai: "kya ye score 6-12 mahine ke real history pe paisa banata hai" — bina hafto wait kiye seconds mein pata chal sakta hai. File ke apne comments (lines 20-24) kehte hain ki ye 37 live trades ka sample bahut chhota hai.
 
-**Action:** TradingView Strategy Tester mein `pineStrategy.js` ko BANKNIFTY 5-min chart pe kam se kam **1 saal** ke history pe chalao. Dekho:
+**Action:** TradingView Strategy Tester mein `strategy/pineStrategy.js` ko BANKNIFTY 5-min chart pe kam se kam **1 saal** ke history pe chalao. Dekho:
 - Net profit/loss kya hai (options premium approximation ke saath, jo file mein already built hai)
 - `minEfficiencyRatio` ko 0 / 0.15 / 0.25 / 0.35 pe sweep karke dekho — regime filter helpful hai ya nahi (ye khud file ka comment bhi bolta hai: "the whole reason this backtest exists")
 - Agar ek saal ke data pe bhi ye net loss deta hai — to RUNBOOK ka apna rule follow karo: **"a LOSS here is conclusive — the idea is dead, stop"**. Fir naya entry logic banane ka kaam priority ban jaata hai, na ki isी ko tune karte rehna.
@@ -115,7 +115,7 @@ Ye sabse fast aur sabse zyada information-dense step hai — baaki sab steps haf
 
 ### Priority 2 — Script version confirm karo (Section 2.4)
 
-TradingView pe live chart ka Pine script `pineScript.js` (is repo) se match karta hai ya nahi, ye aaj hi verify karo. Agar mismatch mila, to sync karo aur RUNBOOK Step 4 dobara follow karo.
+TradingView pe live chart ka Pine script `strategy/pineScript.js` (is repo) se match karta hai ya nahi, ye aaj hi verify karo. Agar mismatch mila, to sync karo aur RUNBOOK Step 4 dobara follow karo.
 
 ### Priority 3 — Paper trading jaari rakho, kam se kam 3-4 hafte aur
 
@@ -130,7 +130,7 @@ Jab Priority 1 (backtest) positive aaye AUR Priority 3 (naya paper sample) bhi c
 - Chhoti position size se shuru karo (1 lot)
 - Kill switch (`app_config.trading_enabled` / `entries_enabled`) hamesha haath mein rakho
 - `UPSTOX_SANDBOX_ACCESS_TOKEN` ki jagah live token + live base URL — is switch ko bahut carefully, ek alag `.env` change ke roop mein karo, sandbox se accidentally live mat ho jaye
-- `projectGoal.md` ka "pannding pase 2" item (3 PM ke baad order na lena, same-din square-off) — **ye already implemented hai** (`services/scheduler.js` + `entryCutoffIst=14:45` / `squareOffIst=15:20` in `config/env.js`, verified running in `server.js`). Ye doc mein purana pending note ab stale hai, chaho to `projectGoal.md` update kar sakte ho.
+- `projectGoal.md` ka "pannding pase 2" item (3 PM ke baad order na lena, same-din square-off) — **ye already implemented hai** (`services/scheduler.js` + `entryCutoffIst=14:45` / `squareOffIst=15:20` in `src/config/env.js`, verified running in `server.js`). Ye doc mein purana pending note ab stale hai, chaho to `projectGoal.md` update kar sakte ho.
 
 ### Priority 5 (low urgency) — Regime filter aur exit-tuning
 
@@ -143,4 +143,4 @@ Jab Priority 1 (backtest) positive aaye AUR Priority 3 (naya paper sample) bhi c
 - System **safe** hai (no bugs, clean state, kill switches kaam kar rahe hain).
 - System **15 Aug se net profitable** dikh raha hai — lekin ye **proof nahi**, sirf ek **encouraging signal** hai jiska sample bahut chhota hai.
 - Root cause wahi hai jo RUNBOOK mein already likha tha: **entry signal lagging hai**, aur exit rules (jo already ban chuke hain) is weakness ko bound kar rahe hain, fix nahi kar rahe.
-- Sabse zyada leverage wala agla kadam **code likhna nahi hai — jo backtest tool already bana hua hai (`pineStrategy.js`) usse turant chalana hai.** Ye sabse tez tareeka hai ye pata karne ka ki edge real hai ya nahi, real paisa risk kiye bina.
+- Sabse zyada leverage wala agla kadam **code likhna nahi hai — jo backtest tool already bana hua hai (`strategy/pineStrategy.js`) usse turant chalana hai.** Ye sabse tez tareeka hai ye pata karne ka ki edge real hai ya nahi, real paisa risk kiye bina.

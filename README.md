@@ -5,7 +5,7 @@ strategy and places matching paper-trading orders against the **Upstox
 Sandbox API**. Built for safety first: idempotent alert handling, a
 persisted position state machine, an always-on audit log, and a kill switch.
 
-> **Upgrading from before 12 Aug 2026?** Read [RUNBOOK.md](RUNBOOK.md) first —
+> **Upgrading from before 12 Aug 2026?** Read [RUNBOOK.md](docs/RUNBOOK.md) first —
 > there is a required database migration and the meaning of
 > `trades.entry_price` / `exit_price` has changed.
 
@@ -17,7 +17,7 @@ comes back `status: "open pending"` with `average_price: 0` and
 It validates that your payload, instrument token and quantity are correct, but
 nothing executes. P&L is therefore marked against the option's real traded
 price from Upstox's public 1-minute candles, plus a slippage allowance
-(`PAPER_SLIPPAGE_POINTS`). See [services/marketData.js](services/marketData.js).
+(`PAPER_SLIPPAGE_POINTS`). See [src/services/marketData.js](src/services/marketData.js).
 The broker's own view is recorded separately in `trades.broker_entry_status`
 so a mark is never mistaken for a fill.
 
@@ -29,28 +29,63 @@ migration 001.
 ## Project structure
 
 ```
-server.js                    Express app entry point
-config/env.js                Loads and validates .env, exports config
-routes/webhook.js             POST /webhook/tradingview — orchestration logic
-middleware/validateWebhook.js Shared-secret check + payload schema validation
-services/upstoxService.js     Order placement against Upstox sandbox, with retry
-services/supabaseService.js   All Supabase reads/writes
-services/duplicateCheck.js    Idempotency (alert_id + time-window) logic
-services/positionState.js     FLAT / IN_CALL / IN_PUT state machine helpers
-services/instrumentResolver.js Auto-resolves the ATM instrument_token from price
-services/tradeExecutor.js     Open/close a position — the ONE path both the
-                              webhook and the square-off job go through
-services/marketData.js        Real option premiums (paper-fill pricing)
-services/scheduler.js         Intraday square-off: nothing is carried overnight
-utils/logger.js               pino logger
-utils/retry.js                Generic exponential-backoff retry helper
-utils/marketClock.js          All IST session logic (cutoffs, market hours)
-utils/serialQueue.js          Per-symbol ordering so reversals cannot race
-scripts/find-instrument.js    Manual instrument_token lookup CLI (debugging/override)
-scripts/positions.js          Inspect / close / force-flat a stuck position
-scripts/backfill-premiums.js  Repair historical P&L from real premiums
-sql/schema.sql                Supabase schema — run this first
-sql/migrations/               Incremental migrations — run after schema.sql
+server.js                          Process entry point — timezone pre-flight,
+                                   listen, arm schedulers, graceful shutdown
+
+src/app.js                         Express app assembly (json, routes, 404, errors)
+src/config/env.js                  Loads and validates .env, exports config
+
+src/routes/index.js                Mounts every route group + admin CORS
+src/routes/health.routes.js        GET /health
+src/routes/webhook.routes.js       POST /webhook/tradingview
+src/routes/admin.routes.js         /api/* dashboard routes
+
+src/controllers/webhook.controller.js     TradingView alert orchestration
+src/controllers/health.controller.js      Liveness + kill-switch status
+src/controllers/auth.controller.js        Admin password check
+src/controllers/config.controller.js      Read/flip the trading kill switch
+src/controllers/trades.controller.js      Trade history + marked-to-market open trades
+src/controllers/positions.controller.js   Per-symbol state machine snapshot
+src/controllers/pnl.controller.js         Summary / daily / monthly P&L buckets
+src/controllers/webhookLogs.controller.js Inbound webhook audit trail
+
+src/middlewares/validateWebhook.js Shared-secret check + payload schema validation
+src/middlewares/adminAuth.js       x-admin-password guard for /api/*
+src/middlewares/cors.js            CORS, scoped to the dashboard only
+src/middlewares/notFound.js        404 JSON responder
+src/middlewares/errorHandler.js    Top-level error safety net
+
+src/services/upstoxService.js      Order placement against Upstox sandbox, with retry
+src/services/supabaseService.js    All Supabase reads/writes
+src/services/duplicateCheck.js     Idempotency (alert_id + time-window) logic
+src/services/positionState.js      FLAT / IN_CALL / IN_PUT state machine helpers
+src/services/instrumentResolver.js Auto-resolves the ATM instrument_token from price
+src/services/tradeExecutor.js      Open/close a position — the ONE path both the
+                                   webhook and the square-off job go through
+src/services/marketData.js         Real option premiums (paper-fill pricing)
+src/services/positionMonitor.js    Premium-based stop / trail / time-stop polling
+src/services/scheduler.js          Intraday square-off: nothing is carried overnight
+
+src/utils/logger.js                pino logger
+src/utils/retry.js                 Generic exponential-backoff retry helper
+src/utils/marketClock.js           All IST session logic (cutoffs, market hours)
+src/utils/serialQueue.js           Per-symbol ordering so reversals cannot race
+
+scripts/find-instrument.js         Manual instrument_token lookup CLI (debugging/override)
+scripts/positions.js               Inspect / close / force-flat a stuck position
+scripts/backfill-premiums.js       Repair historical P&L from real premiums
+scripts/replicate-indicator.js     Re-derive the Pine score from stored candles
+
+strategy/pineScript.js             The Pine indicator that fires the alerts
+strategy/pineStrategy.js           Same signal wrapped for the Strategy Tester
+strategy/images/                   Chart screenshots of the strategy
+
+sql/schema.sql                     Supabase schema — run this first
+sql/migrations/                    Incremental migrations — run after schema.sql
+
+research/                          Offline backtest / scoring experiments
+docs/                              RUNBOOK, project goal, investigations
+auto-trading-frontend/             React admin dashboard (separate repo)
 ```
 
 ## Intraday session rules
@@ -60,10 +95,10 @@ so a failure in either still shuts the position:
 
 | Time (IST) | What happens | Enforced by |
 |---|---|---|
-| 14:45 | No new entry accepted | Pine script **and** `routes/webhook.js` |
+| 14:45 | No new entry accepted | Pine script **and** `src/routes/webhook.routes.js` |
 | 15:15 | Force exit | Pine script |
-| 15:20 | Force exit (safety net) | `services/scheduler.js` |
-| any | Position opened on an earlier day is closed as soon as the market opens | `services/scheduler.js` |
+| 15:20 | Force exit (safety net) | `src/services/scheduler.js` |
+| any | Position opened on an earlier day is closed as soon as the market opens | `src/services/scheduler.js` |
 
 The server-side rules exist because Pine can only act when a bar closes and
 only when its exit condition is met — if the score never weakens, no exit alert
@@ -110,7 +145,7 @@ Copy `.env.example` to `.env` and fill in:
 **How `instrument_token` gets resolved:** the sample TradingView payload only
 has `symbol` (e.g. `"BANKNIFTY"`) and `price` (the underlying's price), not a
 specific option contract. On every entry signal where the payload doesn't
-include an explicit `instrument_token`, `services/instrumentResolver.js`
+include an explicit `instrument_token`, `src/services/instrumentResolver.js`
 auto-resolves it: it downloads (and caches, refreshing every
 `INSTRUMENT_MASTER_CACHE_TTL_MS`) Upstox's public instrument master, rounds
 `price` to the nearest `STRIKE_INTERVAL` to get the ATM strike, and picks the

@@ -1,73 +1,19 @@
 'use strict';
 
-const express = require('express');
-const config = require('./config/env');
-const logger = require('./utils/logger');
-const webhookRouter = require('./routes/webhook');
-const adminRouter = require('./routes/admin');
-const supabaseService = require('./services/supabaseService');
-const instrumentResolver = require('./services/instrumentResolver');
-const scheduler = require('./services/scheduler');
-const positionMonitor = require('./services/positionMonitor');
-const marketClock = require('./utils/marketClock');
-
-const app = express();
-
-app.use(express.json({ limit: '1mb' }));
-
-// CORS for the admin dashboard frontend only — the webhook endpoint doesn't
-// need it (TradingView calls it server-to-server, not from a browser).
-app.use('/api', (req, res, next) => {
-  const origin = config.adminAllowedOrigin || '*';
-  res.header('Access-Control-Allow-Origin', origin);
-  res.header('Access-Control-Allow-Headers', 'Content-Type, x-admin-password');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(204);
-    return;
-  }
-  next();
-});
-
-app.get('/health', async (req, res) => {
-  let reachable = false;
-  let tradingEnabled = null;
-  let entriesEnabled = null;
-  try {
-    ({ reachable, tradingEnabled, entriesEnabled } = await supabaseService.getAppConfigStatus());
-  } catch (err) {
-    logger.error({ err: err.message }, 'Health check: failed to reach Supabase');
-  }
-
-  res.status(reachable ? 200 : 503).json({
-    status: reachable ? 'ok' : 'degraded',
-    trading_enabled: tradingEnabled,
-    entries_enabled: entriesEnabled,
-    db_reachable: reachable,
-    sandbox_mode: true,
-    market_open: marketClock.isMarketOpen(Date.now(), config),
-    ist_time: marketClock.istString(),
-    entry_cutoff_ist: config.entryCutoffIst,
-    square_off_ist: config.squareOffIst,
-    time: new Date().toISOString(),
-  });
-});
-
-app.use('/webhook', webhookRouter);
-app.use('/api', adminRouter);
-
-app.use((req, res) => {
-  res.status(404).json({ status: 'error', message: 'Not found' });
-});
-
-// Final safety net: catches anything thrown synchronously or passed to
-// next(err) that slipped past the route-level try/catch, so a bug never
-// takes the whole process down mid-trading-session.
-// eslint-disable-next-line no-unused-vars
-app.use((err, req, res, next) => {
-  logger.error({ err: err.message, stack: err.stack }, 'Unhandled error reached top-level error handler');
-  res.status(500).json({ status: 'error', message: 'Internal server error' });
-});
+/**
+ * Process entry point. Everything about *what* the server does lives in
+ * src/ — this file only owns the process lifecycle: the pre-flight timezone
+ * check, binding the port, arming the schedulers once the schema is known
+ * good, and shutting down cleanly.
+ */
+const app = require('./src/app');
+const config = require('./src/config/env');
+const logger = require('./src/utils/logger');
+const supabaseService = require('./src/services/supabaseService');
+const instrumentResolver = require('./src/services/instrumentResolver');
+const scheduler = require('./src/services/scheduler');
+const positionMonitor = require('./src/services/positionMonitor');
+const marketClock = require('./src/utils/marketClock');
 
 // Checked before the server accepts anything: if the runtime cannot resolve
 // Asia/Kolkata, every session rule silently applies 5h30m off and no error

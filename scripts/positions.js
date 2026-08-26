@@ -22,10 +22,10 @@
  */
 
 require('dotenv').config();
-const supabaseService = require('../services/supabaseService');
-const tradeExecutor = require('../services/tradeExecutor');
-const { supabase } = require('../services/supabaseService');
-const { istString } = require('../utils/marketClock');
+const supabaseService = require('../src/services/supabaseService');
+const tradeExecutor = require('../src/services/tradeExecutor');
+const { supabase } = require('../src/services/supabaseService');
+const { istString } = require('../src/utils/marketClock');
 
 const CLOSE = process.argv.includes('--close');
 const FORCE_FLAT = process.argv.includes('--force-flat');
