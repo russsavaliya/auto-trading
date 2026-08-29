@@ -50,7 +50,7 @@ async function loadHistory(monthsBack) {
     if (c.monthsBack >= monthsBack) { console.log(`(using cache: ${c.candles.length} candles)`); return c.candles; }
   }
   const out = new Map();
-  const end = new Date('2026-08-21T00:00:00Z');
+  const end = new Date(process.env.ORB_END || '2026-08-29T00:00:00Z');
   for (let i = 0; i < monthsBack * 30 / 25 + 1; i++) {
     const to = new Date(end); to.setUTCDate(to.getUTCDate() - i * 25);
     const from = new Date(to); from.setUTCDate(from.getUTCDate() - 25);

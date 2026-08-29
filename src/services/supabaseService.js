@@ -169,6 +169,21 @@ async function verifySchema() {
     return { ok: false, error: error.message };
   }
   logger.info('Schema check passed — premium-accounting columns present');
+
+  // Migration 003 is optional for trading — the exit rules work without it —
+  // but every poll it is missing is a premium path that can never be recovered,
+  // so say so once at boot rather than letting it stay silently off.
+  const { error: samplesErr } = await supabase.from('trade_premium_samples').select('id').limit(1);
+  if (samplesErr) {
+    logger.warn(
+      'trade_premium_samples is missing — run sql/migrations/003_premium_samples.sql. ' +
+        'Trading is unaffected, but the premium path of every trade is being discarded, ' +
+        'and Upstox cannot supply it later for expired contracts.'
+    );
+  } else {
+    logger.info('Premium path recording is active (migration 003 present)');
+  }
+
   return { ok: true };
 }
 
@@ -432,6 +447,30 @@ async function updatePeakPremium(tradeId, peakPremium) {
 }
 
 /**
+ * Appends one point of an open position's premium path.
+ *
+ * Fire-and-forget by design: this is analysis data, and a failure to record it
+ * must never propagate into the monitor tick that is also running the
+ * stop-loss. Errors are logged at debug, not error — if the table has not been
+ * created yet (migration 003) every poll would otherwise spam the log for a
+ * feature that has no effect on trading.
+ *
+ * Cannot be rebuilt later — Upstox deletes candle history for expired option
+ * contracts, so a sample not taken now is gone. See the migration for the
+ * measurement.
+ */
+async function insertPremiumSample(tradeId, premium, candleAt) {
+  try {
+    const { error } = await supabase
+      .from('trade_premium_samples')
+      .insert({ trade_id: tradeId, premium, candle_at: candleAt || null });
+    if (error) logger.debug({ err: error.message, tradeId }, 'Could not record premium sample');
+  } catch (err) {
+    logger.debug({ err: err.message, tradeId }, 'Could not record premium sample');
+  }
+}
+
+/**
  * How many positions this symbol has already opened today, in IST.
  *
  * FAILED rows are excluded on purpose: insertTrade() writes the row before the
@@ -548,6 +587,7 @@ module.exports = {
   insertTrade,
   markTradeOpen,
   updatePeakPremium,
+  insertPremiumSample,
   countTradesToday,
   getLastClosedTrade,
   markTradeFailed,

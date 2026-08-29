@@ -75,6 +75,7 @@ scripts/find-instrument.js         Manual instrument_token lookup CLI (debugging
 scripts/positions.js               Inspect / close / force-flat a stuck position
 scripts/backfill-premiums.js       Repair historical P&L from real premiums
 scripts/replicate-indicator.js     Re-derive the Pine score from stored candles
+scripts/test-exit-rules.js         Exit-rule checks incl. the morning-neutrality regression
 
 strategy/pineScript.js             The Pine indicator that fires the alerts
 strategy/pineStrategy.js           Same signal wrapped for the Strategy Tester
@@ -84,6 +85,7 @@ sql/schema.sql                     Supabase schema — run this first
 sql/migrations/                    Incremental migrations — run after schema.sql
 
 research/                          Offline backtest / scoring experiments
+research/time-of-day.js            Is the morning edge real over 12 months, or 7 lucky trades
 docs/                              RUNBOOK, project goal, investigations
 auto-trading-frontend/             React admin dashboard (separate repo)
 ```

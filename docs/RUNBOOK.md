@@ -81,6 +81,37 @@ Agar migration nahi chali to server clear error dega aur square-off scheduler
 start nahi hoga (jaan bujh kar — jo close hi na ho sake use force-close karna
 galat hai).
 
+### Step 1b — migration 003 (trading ke liye zaroori nahi, par turant chalao)
+
+Usi SQL Editor mein:
+
+```
+sql/migrations/003_premium_samples.sql
+```
+
+Ye har open position ka **premium path** save karta hai — monitor har 30 second
+premium fetch karta hi hai, bas ab use phenkta nahi.
+
+Isko turant chalane ki wajah: Upstox **expired option contracts ka candle
+history delete kar deta hai**. 29 Aug 2026 ko measure kiya — 6 Aug se ab tak ke
+75 trades mein se sirf 6 sabse naye reconstruct ho paaye, baaki ka data hamesha
+ke liye gaya. Matlab jo sample aaj nahi liya, wo kabhi nahi milega. Iske bina
+"ye exit rule badalne se kya hota" wala sawaal **backtest ho hi nahi sakta** —
+sirf `peak_premium` bachta hai, aur ek high-water mark se path nahi banta.
+
+Trading iske bina bhi chalti rahegi. Agar table nahi hai to server boot par
+warn karta hai:
+
+```
+trade_premium_samples is missing — run sql/migrations/003_premium_samples.sql
+```
+
+Table ban jaane ke baad:
+
+```
+Premium path recording is active (migration 003 present)
+```
+
 ---
 
 ## Step 2 — Purana P&L theek karo (backfill)

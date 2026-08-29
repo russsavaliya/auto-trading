@@ -149,6 +149,24 @@ const config = {
   trailArmPct: parseFloatEnv(process.env.TRAIL_ARM_PCT, 0.03),
   // Once armed, close if the premium retraces this far from its peak.
   trailPct: parseFloatEnv(process.env.TRAIL_PCT, 0.05),
+  // Never let the trailing stop fire BELOW what we paid plus the friction of
+  // getting out.
+  //
+  // Without this the trail arms at +3% but a 5% retrace from the peak only
+  // stays above entry once the peak is +5.26%, so every peak between those two
+  // arms a stop whose trigger price is already under water — an exit that can
+  // only book a loss. Measured over 17-28 Aug, 7 trades armed into that hole.
+  //
+  // The floor is a clamp on the trigger, NOT a refusal to arm: refusing would
+  // leave the position running to the 30-minute time stop or the -10% hard
+  // stop, which makes the tail worse than the small loss the trail was taking.
+  // Clamping keeps the protective exit and only forbids it from firing at a
+  // loss — the standard "move the stop to breakeven" rule.
+  //
+  // Verified against every trade with a recorded peak: the clamp does not bind
+  // on ANY trade entered before 10:00, so the opening trades — the only ones
+  // currently making money — behave identically with it on or off.
+  trailBreakevenFloor: parseBool(process.env.TRAIL_BREAKEVEN_FLOOR, true),
   // Give up on a position that has gone nowhere. 0 disables the time stop.
   maxHoldMinutes: parseIntEnv(process.env.MAX_HOLD_MINUTES, 30),
   exitPollSeconds: parseIntEnv(process.env.EXIT_POLL_SECONDS, 30),
@@ -189,5 +207,12 @@ const config = {
   // --------------------------------------------------------------------------
   maxTradesPerDay: parseIntEnv(process.env.MAX_TRADES_PER_DAY, 2),
 };
+
+/**
+ * What a round trip costs in premium points — slippage crossed on the way in
+ * AND on the way out. Derived rather than configured separately so it can
+ * never drift out of step with the fill pricing that actually charges it.
+ */
+config.roundTripCostPoints = config.paperSlippagePoints * 2;
 
 module.exports = config;

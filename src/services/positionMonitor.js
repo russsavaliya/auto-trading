@@ -23,7 +23,9 @@ const marketClock = require('../utils/marketClock');
  * Three rules, checked in this order (worst case first):
  *   1. stop loss   — premium fell stopLossPct below entry
  *   2. trailing    — armed once trailArmPct in profit, fires on a trailPct
- *                    retrace from the highest premium seen
+ *                    retrace from the highest premium seen, but never at a
+ *                    price below entry + round-trip cost (see
+ *                    trailTriggerPrice)
  *   3. time stop   — position has gone nowhere for maxHoldMinutes
  *
  * The Pine exit signal still works and remains the backstop; whichever fires
@@ -39,12 +41,36 @@ const marketClock = require('../utils/marketClock');
 
 let timer = null;
 
+/**
+ * The price at which an armed trailing stop fires.
+ *
+ * `peak * (1 - trailPct)` alone can sit BELOW the entry price: the trail arms
+ * at +trailArmPct (3%) but a trailPct (5%) retrace only stays above entry once
+ * the peak is +5.26%. Every peak between those two arms a stop that can only
+ * book a loss — 7 of the 23 trades with a recorded peak did exactly that
+ * between 17 and 28 Aug.
+ *
+ * The floor clamps the trigger to entry plus the round-trip friction, so an
+ * armed trail exits flat at worst. It is a clamp and not a refusal to arm on
+ * purpose: refusing would leave the position running to the time stop or the
+ * -10% hard stop, which is a worse tail than the small loss it replaces.
+ */
+function trailTriggerPrice(entry, peak) {
+  const retrace = peak * (1 - config.trailPct);
+  if (!config.trailBreakevenFloor) return retrace;
+  return Math.max(retrace, entry + config.roundTripCostPoints);
+}
+
 /** Returns a reason string when a rule fires, otherwise null. */
 function evaluate({ entry, current, peak, heldMinutes }) {
   if (config.stopLossPct > 0 && current <= entry * (1 - config.stopLossPct)) {
     return 'stop_loss';
   }
-  if (config.trailPct > 0 && peak >= entry * (1 + config.trailArmPct) && current <= peak * (1 - config.trailPct)) {
+  if (
+    config.trailPct > 0 &&
+    peak >= entry * (1 + config.trailArmPct) &&
+    current <= trailTriggerPrice(entry, peak)
+  ) {
     return 'trailing_stop';
   }
   if (config.maxHoldMinutes > 0 && heldMinutes >= config.maxHoldMinutes) {
@@ -74,6 +100,16 @@ async function checkTrade(trade) {
   }
 
   const current = mark.premium;
+
+  // Keep the sample. Not awaited on purpose: this is analysis data and the
+  // stop-loss below must not wait on a write, nor be affected if it fails
+  // (insertPremiumSample swallows its own errors and never throws).
+  //
+  // It has to be recorded live because it cannot be recovered afterwards —
+  // Upstox deletes candle history for expired option contracts, which is why
+  // only 6 of the first 75 trades could ever be reconstructed.
+  void supabaseService.insertPremiumSample(trade.id, current, mark.candleAt);
+
   const storedPeak = trade.peak_premium == null ? entry : Number(trade.peak_premium);
   const peak = Math.max(storedPeak, current);
 
@@ -143,6 +179,8 @@ function start() {
       stopLossPct: config.stopLossPct,
       trailArmPct: config.trailArmPct,
       trailPct: config.trailPct,
+      trailBreakevenFloor: config.trailBreakevenFloor,
+      roundTripCostPoints: config.roundTripCostPoints,
       maxHoldMinutes: config.maxHoldMinutes,
       pollSeconds: config.exitPollSeconds,
     },
@@ -160,4 +198,4 @@ function stop() {
   timer = null;
 }
 
-module.exports = { start, stop, tick, evaluate };
+module.exports = { start, stop, tick, evaluate, trailTriggerPrice };
