@@ -184,6 +184,20 @@ async function verifySchema() {
     logger.info('Premium path recording is active (migration 003 present)');
   }
 
+  // Migration 004 adds the cost columns and the runtime-config knobs. Trading
+  // works without it — charges simply stay null and the cap falls back to the
+  // env value — but the Report page cannot show net P&L until it is applied.
+  const { error: chargesErr } = await supabase.from('trades').select('charges').limit(1);
+  if (chargesErr) {
+    logger.warn(
+      'trades.charges is missing — run sql/migrations/004_charges_and_runtime_config.sql. ' +
+        'Until then every P&L stays GROSS, the Report page cannot show net, and the ' +
+        'Settings page cannot change the daily cap.'
+    );
+  } else {
+    logger.info('Charge accounting and runtime config are active (migration 004 present)');
+  }
+
   return { ok: true };
 }
 
@@ -206,6 +220,79 @@ async function setTradingEnabled(enabled) {
     throw new Error('Failed to update trading_enabled');
   }
   return data;
+}
+
+/**
+ * Everything the trading path is allowed to change at runtime, in one read.
+ *
+ * These used to be env vars, which on Render means a redeploy — so the daily
+ * cap could not be adjusted while the market was open, which is the only time
+ * anyone wants to adjust it. They now live beside trading_enabled.
+ *
+ * FALLS BACK TO ENV, never throws. A config read that fails must not decide
+ * "cap is 0, trade freely" — the env defaults are the same values the row was
+ * seeded with, so an unreadable row behaves exactly like an unedited one.
+ * (The kill switch keeps its own separate, fail-paused path in
+ * isTradingEnabled() — this function is for the numeric knobs only.)
+ */
+async function getRuntimeConfig() {
+  const fallback = {
+    maxTradesPerDay: config.maxTradesPerDay,
+    reEntryCooldownEnabled: config.reEntryCooldownMinutes > 0,
+    reEntryCooldownMinutes: config.reEntryCooldownMinutes,
+    source: 'env-fallback',
+  };
+
+  const { data, error } = await supabase
+    .from('app_config')
+    .select('max_trades_per_day, re_entry_cooldown_enabled, re_entry_cooldown_minutes')
+    .eq('id', 1)
+    .maybeSingle();
+
+  if (error || !data) {
+    logger.warn(
+      { err: error?.message },
+      'Could not read runtime config from app_config — using env defaults. Run sql/migrations/004_charges_and_runtime_config.sql.'
+    );
+    return fallback;
+  }
+
+  return {
+    maxTradesPerDay: Number(data.max_trades_per_day),
+    reEntryCooldownEnabled: Boolean(data.re_entry_cooldown_enabled),
+    reEntryCooldownMinutes: Number(data.re_entry_cooldown_minutes),
+    source: 'db',
+  };
+}
+
+/**
+ * Applies a validated patch from the Settings page. Only the three keys below
+ * are writable; anything else in the body is ignored rather than passed
+ * through, so a malformed request can never reach a column it should not.
+ * Range checking happens in controllers/config.controller.js.
+ */
+async function setRuntimeConfig(patch) {
+  const COLUMNS = {
+    maxTradesPerDay: 'max_trades_per_day',
+    reEntryCooldownEnabled: 're_entry_cooldown_enabled',
+    reEntryCooldownMinutes: 're_entry_cooldown_minutes',
+  };
+
+  const update = {};
+  for (const [key, column] of Object.entries(COLUMNS)) {
+    if (patch[key] !== undefined) update[column] = patch[key];
+  }
+  if (!Object.keys(update).length) return getRuntimeConfig();
+
+  update.updated_at = new Date().toISOString();
+
+  const { error } = await supabase.from('app_config').update(update).eq('id', 1);
+  if (error) {
+    logger.error({ err: error, update }, 'Failed to update runtime config');
+    throw new Error('Failed to update settings');
+  }
+  logger.info({ update }, 'Runtime config updated from the dashboard');
+  return getRuntimeConfig();
 }
 
 /**
@@ -355,7 +442,19 @@ async function getTradeById(tradeId) {
  * closedReason distinguishes a signal exit from a forced square-off, which
  * matters when reviewing whether the strategy or the clock ended the trade.
  */
-async function closeTrade(tradeId, { exitPremium, exitSpot, scoreAtExit, exitOrderId, pnl, fillSource, brokerStatus, closedReason }) {
+/**
+ * `pnl` stays GROSS here, and `charges` is stored beside it rather than netted
+ * into it. Two reasons, both about not rewriting history:
+ *   - every existing row, the summary endpoint and the equity curve already
+ *     mean "gross" by that column; silently changing what it holds would make
+ *     old and new rows incomparable with no way to tell them apart;
+ *   - the charge that applied is a fact about the day the trade closed, and
+ *     statutory rates move. Net is a subtraction anyone can do; an overwritten
+ *     gross figure is gone.
+ * The Report page shows gross, cost and net side by side for exactly this
+ * reason — see controllers/pnl.controller.js.
+ */
+async function closeTrade(tradeId, { exitPremium, exitSpot, scoreAtExit, exitOrderId, pnl, fillSource, brokerStatus, closedReason, charges, chargesBreakdown }) {
   const { error } = await supabase
     .from('trades')
     .update({
@@ -365,6 +464,8 @@ async function closeTrade(tradeId, { exitPremium, exitSpot, scoreAtExit, exitOrd
       score_at_exit: scoreAtExit,
       exit_order_id: exitOrderId,
       pnl,
+      charges: charges ?? null,
+      charges_breakdown: chargesBreakdown ?? null,
       exit_fill_source: fillSource,
       broker_exit_status: brokerStatus,
       closed_reason: closedReason,
@@ -534,18 +635,32 @@ async function listRunningTrades() {
   return data;
 }
 
-async function getClosedTradesSince(sinceIso) {
-  let query = supabase
-    .from('trades')
-    .select('id, symbol, signal_type, pnl, quantity, entry_price, exit_price, entry_spot, exit_spot, closed_reason, created_at, closed_at')
-    .eq('status', 'CLOSED')
-    .order('closed_at', { ascending: true });
+const CLOSED_TRADE_COLUMNS =
+  'id, symbol, signal_type, pnl, quantity, entry_price, exit_price, entry_spot, exit_spot, closed_reason, created_at, closed_at';
 
-  if (sinceIso) {
-    query = query.gte('closed_at', sinceIso);
+async function getClosedTradesSince(sinceIso) {
+  const run = (columns) => {
+    let query = supabase
+      .from('trades')
+      .select(columns)
+      .eq('status', 'CLOSED')
+      .order('closed_at', { ascending: true });
+    if (sinceIso) query = query.gte('closed_at', sinceIso);
+    return query;
+  };
+
+  // The charge columns arrive with migration 004. Selecting a column that does
+  // not exist fails the WHOLE query, so a deploy that landed before the
+  // migration was applied would take the summary, the equity curve and the
+  // daily chart down with it — not just the new Report page. Falling back to
+  // the narrower select keeps every existing screen working; the Report page
+  // then recomputes charges from the premiums instead. Same reasoning, and the
+  // same shape, as the entries_enabled fallback in getAppConfigStatus().
+  let { data, error } = await run(`${CLOSED_TRADE_COLUMNS}, charges, charges_breakdown`);
+  if (error) {
+    ({ data, error } = await run(CLOSED_TRADE_COLUMNS));
   }
 
-  const { data, error } = await query;
   if (error) {
     logger.error({ err: error }, 'Failed to fetch closed trades');
     throw error;
@@ -588,6 +703,8 @@ module.exports = {
   markTradeOpen,
   updatePeakPremium,
   insertPremiumSample,
+  getRuntimeConfig,
+  setRuntimeConfig,
   countTradesToday,
   getLastClosedTrade,
   markTradeFailed,

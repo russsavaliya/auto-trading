@@ -32,5 +32,6 @@ router.get('/positions', positionsController.listPositions);
 router.get('/pnl/summary', pnlController.getSummary);
 router.get('/pnl/monthly', pnlController.getMonthly);
 router.get('/pnl/daily', pnlController.getDaily);
+router.get('/pnl/report', pnlController.getReport);
 
 module.exports = router;

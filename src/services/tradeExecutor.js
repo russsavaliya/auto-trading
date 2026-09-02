@@ -2,6 +2,7 @@
 
 const config = require('../config/env');
 const logger = require('../utils/logger');
+const charges = require('./charges');
 const supabaseService = require('./supabaseService');
 const positionState = require('./positionState');
 const upstoxService = require('./upstoxService');
@@ -78,8 +79,8 @@ async function currentSpot(symbol) {
  */
 const RULE_EXITS = new Set(['stop_loss', 'trailing_stop', 'time_stop']);
 
-async function blockedByRecentRuleExit(symbol, signalType) {
-  if (config.reEntryCooldownMinutes <= 0) return null;
+async function blockedByRecentRuleExit(symbol, signalType, runtime) {
+  if (!runtime.reEntryCooldownEnabled || runtime.reEntryCooldownMinutes <= 0) return null;
 
   const last = await supabaseService.getLastClosedTrade(symbol);
   if (!last || !RULE_EXITS.has(last.closed_reason)) return null;
@@ -89,9 +90,9 @@ async function blockedByRecentRuleExit(symbol, signalType) {
   if (!sameSide) return null;
 
   const minutesSince = (Date.now() - new Date(last.closed_at).getTime()) / 60000;
-  if (minutesSince >= config.reEntryCooldownMinutes) return null;
+  if (minutesSince >= runtime.reEntryCooldownMinutes) return null;
 
-  return `re_entry_cooldown: ${last.closed_reason} on trade ${last.id} ${minutesSince.toFixed(0)}m ago (need ${config.reEntryCooldownMinutes}m)`;
+  return `re_entry_cooldown: ${last.closed_reason} on trade ${last.id} ${minutesSince.toFixed(0)}m ago (need ${runtime.reEntryCooldownMinutes}m)`;
 }
 
 /**
@@ -105,23 +106,28 @@ async function blockedByRecentRuleExit(symbol, signalType) {
  * Checked before the instrument is resolved and before any row is written, so
  * a capped signal costs nothing but a webhook_log line.
  */
-async function blockedByDailyCap(symbol) {
-  if (config.maxTradesPerDay <= 0) return null;
+async function blockedByDailyCap(symbol, runtime) {
+  if (runtime.maxTradesPerDay <= 0) return null;
 
   const takenToday = await supabaseService.countTradesToday(symbol);
-  if (takenToday < config.maxTradesPerDay) return null;
+  if (takenToday < runtime.maxTradesPerDay) return null;
 
-  return `daily_cap_reached: ${takenToday} of ${config.maxTradesPerDay} trades already taken today`;
+  return `daily_cap_reached: ${takenToday} of ${runtime.maxTradesPerDay} trades already taken today`;
 }
 
 async function openPosition({ alertId, signalType, symbol, spot, score, quantity, product, orderType, instrumentToken }) {
-  const capped = await blockedByDailyCap(symbol);
+  // Read once and thread it through, rather than letting each gate hit the
+  // database on its own — both run on every entry, and a cap that changed
+  // between the two checks would be a genuinely confusing bug to chase.
+  const runtime = await supabaseService.getRuntimeConfig();
+
+  const capped = await blockedByDailyCap(symbol, runtime);
   if (capped) {
     logger.warn({ symbol, signalType, capped }, 'Entry refused: daily trade cap reached');
     return { ok: false, reason: capped };
   }
 
-  const cooldown = await blockedByRecentRuleExit(symbol, signalType);
+  const cooldown = await blockedByRecentRuleExit(symbol, signalType, runtime);
   if (cooldown) {
     logger.warn({ symbol, signalType, cooldown }, 'Entry refused: cooling off after a risk-rule exit');
     return { ok: false, reason: cooldown };
@@ -243,19 +249,40 @@ async function closePosition({ symbol, signalType = null, spot = null, score = n
         ? Number(((fill.premium - entryPremium) * Number(trade.quantity)).toFixed(2))
         : null;
 
+    // What the round trip cost. Returns null when either leg is unpriced —
+    // the same condition that already forced pnl to null above, so gross and
+    // cost are never present for one leg and absent for the other.
+    const cost = charges.computeRoundTrip({
+      entryPremium,
+      exitPremium: fill.premium,
+      quantity: trade.quantity,
+    });
+
     await supabaseService.closeTrade(tradeId, {
       exitPremium: fill.premium,
       exitSpot,
       scoreAtExit: score,
       exitOrderId: orderId,
       pnl,
+      charges: cost ? cost.total : null,
+      chargesBreakdown: cost,
       fillSource: fill.source,
       brokerStatus: fill.brokerStatus,
       closedReason: reason,
     });
 
     logger.info(
-      { tradeId, orderId, symbol, entryPremium, exitPremium: fill.premium, pnl, reason },
+      {
+        tradeId,
+        orderId,
+        symbol,
+        entryPremium,
+        exitPremium: fill.premium,
+        pnl,
+        charges: cost ? cost.total : null,
+        netPnl: charges.applyToPnl(pnl, cost ? cost.total : null),
+        reason,
+      },
       'Position closed'
     );
     return { ok: true, tradeId, pnl };
