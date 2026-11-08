@@ -301,8 +301,9 @@ SEBI requires on every live order. Details and the IP registration are in
 | URL | `https://139-59-52-230.sslip.io` (Caddy, automatic HTTPS) |
 | TradingView webhook | `https://139-59-52-230.sslip.io/webhook/tradingview?token=<WEBHOOK_SECRET>` |
 | Process | systemd unit `bridge`, user `app`, code in `/opt/bridge`, Node 24 |
-| Secrets | `/opt/bridge/.env` on the server only — never in the repo |
-| Deploy | `bash scripts/deploy-do.sh` — refuses while the market is open |
+| Secrets | `/opt/bridge/.env` on the server only — never in the repo. A droplet has no env-var screen like Render or Vercel |
+| Change a setting | Edit the local `.env`, then `node scripts/set-server-env.js KEY` (works from PowerShell; refuses while the market is open) |
+| Deploy | `bash scripts/deploy-do.sh` from Git Bash — refuses while the market is open |
 | Logs | `ssh -i ~/.ssh/do_trading root@64.227.153.201 journalctl -u bridge -f` |
 
 Node 22 or newer is required: `@supabase/supabase-js` needs the native
