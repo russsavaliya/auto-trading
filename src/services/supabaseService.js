@@ -4,6 +4,7 @@ const { createClient } = require('@supabase/supabase-js');
 const config = require('../config/env');
 const logger = require('../utils/logger');
 const marketClock = require('../utils/marketClock');
+const { PAPER } = require('../config/modes');
 
 const supabase = createClient(config.supabaseUrl, config.supabaseServiceKey, {
   auth: { persistSession: false },
@@ -35,12 +36,20 @@ async function insertWebhookLog(rawPayload) {
   return data.id;
 }
 
-async function updateWebhookLog(id, { processed, reason }) {
+/**
+ * `processed` / `reason` are the PAPER outcome and always have been — every
+ * existing row means that, and so does the Webhook Logs page. Live writes to
+ * its own column pair instead of redefining them, so old and new rows stay
+ * comparable. See sql/migrations/005.
+ */
+async function updateWebhookLog(id, { processed, reason, mode = PAPER }) {
   if (id === null || id === undefined) return;
-  const { error } = await supabase
-    .from('webhook_log')
-    .update({ processed, reason: reason ?? null })
-    .eq('id', id);
+  const patch =
+    mode === PAPER
+      ? { processed, reason: reason ?? null }
+      : { live_processed: processed, live_reason: reason ?? null };
+
+  const { error } = await supabase.from('webhook_log').update(patch).eq('id', id);
 
   if (error) {
     logger.error({ err: error, id }, 'Failed to update webhook_log row');
@@ -59,10 +68,10 @@ async function updateWebhookLog(id, { processed, reason }) {
  *
  * @returns {{inserted: boolean}} inserted=false means this alert_id was already seen.
  */
-async function insertProcessedAlert({ alertId, symbol, signalType }) {
+async function insertProcessedAlert({ alertId, symbol, signalType, mode = PAPER }) {
   const { error } = await supabase
     .from('processed_alerts')
-    .insert({ alert_id: alertId, symbol, signal_type: signalType });
+    .insert({ alert_id: alertId, symbol, signal_type: signalType, mode });
 
   if (!error) return { inserted: true };
 
@@ -78,12 +87,13 @@ async function insertProcessedAlert({ alertId, symbol, signalType }) {
  * Most recent processed_alerts row for this symbol+signal_type, excluding
  * the given alert_id itself, used for the time-window duplicate check.
  */
-async function getLastAlertForSignal({ symbol, signalType, excludeAlertId }) {
+async function getLastAlertForSignal({ symbol, signalType, excludeAlertId, mode = PAPER }) {
   const { data, error } = await supabase
     .from('processed_alerts')
     .select('alert_id, received_at')
     .eq('symbol', symbol)
     .eq('signal_type', signalType)
+    .eq('mode', mode)
     .neq('alert_id', excludeAlertId)
     .order('received_at', { ascending: false })
     .limit(1)
@@ -109,9 +119,16 @@ async function getLastAlertForSignal({ symbol, signalType, excludeAlertId }) {
  * misconfiguration, table missing), we fall back to config.tradingEnabledFallback
  * rather than assuming trading is enabled.
  */
-async function isTradingEnabled() {
-  const { reachable, tradingEnabled } = await getAppConfigStatus();
+async function isTradingEnabled(mode = PAPER) {
+  const { reachable, tradingEnabled } = await getAppConfigStatus(mode);
   if (!reachable) {
+    // Live must NEVER fall back to "enabled" on an unreadable config. The env
+    // fallback exists so paper keeps running through a Supabase blip; applying
+    // it to live would let real orders go out on the strength of a failed read.
+    if (mode !== PAPER) {
+      logger.error({ mode }, 'Could not read live app_config — refusing to trade live');
+      return false;
+    }
     logger.warn('Could not read app_config.trading_enabled — using TRADING_ENABLED env fallback');
     return config.tradingEnabledFallback;
   }
@@ -124,11 +141,11 @@ async function isTradingEnabled() {
  * swallows the same failure to fail "paused" on the trading path — this is
  * the version that lets the health check tell the two situations apart.)
  */
-async function getAppConfigStatus() {
+async function getAppConfigStatus(mode = PAPER) {
   const { data, error } = await supabase
     .from('app_config')
     .select('trading_enabled, entries_enabled')
-    .eq('id', 1)
+    .eq('mode', mode)
     .maybeSingle();
 
   // entries_enabled arrives with migration 001. Falling back to the narrower
@@ -139,7 +156,7 @@ async function getAppConfigStatus() {
     const { data: legacy, error: legacyErr } = await supabase
       .from('app_config')
       .select('trading_enabled')
-      .eq('id', 1)
+      .eq('mode', mode)
       .maybeSingle();
     if (legacyErr || !legacy) return { reachable: false, tradingEnabled: null, entriesEnabled: null };
     return { reachable: true, tradingEnabled: legacy.trading_enabled, entriesEnabled: null };
@@ -198,6 +215,27 @@ async function verifySchema() {
     logger.info('Charge accounting and runtime config are active (migration 004 present)');
   }
 
+  // Migration 005 splits everything into paper/live. Unlike 003 and 004 this
+  // one is NOT optional: every query below now filters on `mode`, and against
+  // a database without that column PostgREST rejects the whole statement. The
+  // failure is safe — no order can be placed — but the bridge is not trading
+  // until this is applied, so it has to be unmissable rather than a warning.
+  // Probed as a FILTER, not a select. `mode` is also the name of a Postgres
+  // ordered-set aggregate, so `select=mode` makes PostgREST complain about
+  // WITHIN GROUP instead of about the missing column — a confusing error that
+  // would send someone debugging the wrong thing. A filter is unambiguous.
+  const { error: modeErr } = await supabase.from('trades').select('id').eq('mode', 'paper').limit(1);
+  if (modeErr) {
+    logger.error(
+      { err: modeErr.message },
+      'SCHEMA OUT OF DATE — trades.mode is missing. Run sql/migrations/005_paper_live_modes.sql NOW. ' +
+        'Until it is applied NOTHING will trade: every entry, exit and square-off will fail on the mode filter. ' +
+        'Apply the migration BEFORE deploying this code, not after.'
+    );
+    return { ok: false, error: modeErr.message };
+  }
+  logger.info('Paper/live mode split is active (migration 005 present)');
+
   return { ok: true };
 }
 
@@ -207,11 +245,11 @@ async function verifySchema() {
  * applies in reverse: the very next webhook after this resolves sees the new
  * value.
  */
-async function setTradingEnabled(enabled) {
+async function setTradingEnabled(enabled, mode = PAPER) {
   const { data, error } = await supabase
     .from('app_config')
     .update({ trading_enabled: enabled, updated_at: new Date().toISOString() })
-    .eq('id', 1)
+    .eq('mode', mode)
     .select('trading_enabled')
     .single();
 
@@ -235,7 +273,7 @@ async function setTradingEnabled(enabled) {
  * (The kill switch keeps its own separate, fail-paused path in
  * isTradingEnabled() — this function is for the numeric knobs only.)
  */
-async function getRuntimeConfig() {
+async function getRuntimeConfig(mode = PAPER) {
   const fallback = {
     maxTradesPerDay: config.maxTradesPerDay,
     reEntryCooldownEnabled: config.reEntryCooldownMinutes > 0,
@@ -246,7 +284,7 @@ async function getRuntimeConfig() {
   const { data, error } = await supabase
     .from('app_config')
     .select('max_trades_per_day, re_entry_cooldown_enabled, re_entry_cooldown_minutes')
-    .eq('id', 1)
+    .eq('mode', mode)
     .maybeSingle();
 
   if (error || !data) {
@@ -271,7 +309,7 @@ async function getRuntimeConfig() {
  * through, so a malformed request can never reach a column it should not.
  * Range checking happens in controllers/config.controller.js.
  */
-async function setRuntimeConfig(patch) {
+async function setRuntimeConfig(patch, mode = PAPER) {
   const COLUMNS = {
     maxTradesPerDay: 'max_trades_per_day',
     reEntryCooldownEnabled: 're_entry_cooldown_enabled',
@@ -282,17 +320,17 @@ async function setRuntimeConfig(patch) {
   for (const [key, column] of Object.entries(COLUMNS)) {
     if (patch[key] !== undefined) update[column] = patch[key];
   }
-  if (!Object.keys(update).length) return getRuntimeConfig();
+  if (!Object.keys(update).length) return getRuntimeConfig(mode);
 
   update.updated_at = new Date().toISOString();
 
-  const { error } = await supabase.from('app_config').update(update).eq('id', 1);
+  const { error } = await supabase.from('app_config').update(update).eq('mode', mode);
   if (error) {
     logger.error({ err: error, update }, 'Failed to update runtime config');
     throw new Error('Failed to update settings');
   }
-  logger.info({ update }, 'Runtime config updated from the dashboard');
-  return getRuntimeConfig();
+  logger.info({ update, mode }, 'Runtime config updated from the dashboard');
+  return getRuntimeConfig(mode);
 }
 
 /**
@@ -304,8 +342,8 @@ async function setRuntimeConfig(patch) {
  * Fails OPEN (returns true) only when the column is genuinely absent, so a
  * project that has not run migration 001 yet keeps working unchanged.
  */
-async function areEntriesEnabled() {
-  const { reachable, entriesEnabled } = await getAppConfigStatus();
+async function areEntriesEnabled(mode = PAPER) {
+  const { reachable, entriesEnabled } = await getAppConfigStatus(mode);
   if (!reachable) {
     logger.warn('Could not read app_config.entries_enabled — refusing new entries');
     return false;
@@ -314,14 +352,74 @@ async function areEntriesEnabled() {
 }
 
 // ----------------------------------------------------------------------------
+// broker_tokens — live credentials, rotated daily
+// ----------------------------------------------------------------------------
+
+/**
+ * The stored live token row, or null.
+ *
+ * Read on every live request rather than cached. The token dies at 03:30 IST
+ * daily, and caching it is precisely how six hours of 401s went unnoticed on
+ * 2 Sep 2026 — the process was holding a token the broker had already retired.
+ */
+async function getBrokerToken(mode = PAPER) {
+  const { data, error } = await supabase
+    .from('broker_tokens')
+    .select('access_token, refresh_token, expires_at, user_id, updated_at, last_error')
+    .eq('mode', mode)
+    .maybeSingle();
+
+  if (error) {
+    logger.error({ err: error.message, mode }, 'Failed to read broker token');
+    return null;
+  }
+  return data;
+}
+
+/** Upserts a freshly minted token and clears any previous failure. */
+async function saveBrokerToken(mode, { accessToken, refreshToken, expiresAt, userId }) {
+  const { error } = await supabase.from('broker_tokens').upsert(
+    {
+      mode,
+      access_token: accessToken,
+      refresh_token: refreshToken ?? null,
+      expires_at: expiresAt ?? null,
+      user_id: userId ?? null,
+      updated_at: new Date().toISOString(),
+      last_error: null,
+    },
+    { onConflict: 'mode' }
+  );
+
+  if (error) {
+    logger.error({ err: error.message, mode }, 'Failed to store broker token');
+    throw new Error('Could not store the broker token');
+  }
+}
+
+/**
+ * Records why a token operation failed, without touching the token itself —
+ * a failed refresh must not delete a token that is still valid for a few
+ * more hours.
+ */
+async function recordBrokerTokenError(mode, message) {
+  const { error } = await supabase.from('broker_tokens').upsert(
+    { mode, last_error: String(message).slice(0, 500), updated_at: new Date().toISOString() },
+    { onConflict: 'mode' }
+  );
+  if (error) logger.error({ err: error.message, mode }, 'Failed to record broker token error');
+}
+
+// ----------------------------------------------------------------------------
 // position_state
 // ----------------------------------------------------------------------------
 
-async function getPositionState(symbol) {
+async function getPositionState(symbol, mode = PAPER) {
   const { data, error } = await supabase
     .from('position_state')
     .select('state, current_trade_id')
     .eq('symbol', symbol)
+    .eq('mode', mode)
     .maybeSingle();
 
   if (error) {
@@ -336,12 +434,13 @@ async function getPositionState(symbol) {
  * see sql/schema.sql for why this has to happen in the database rather than
  * as a JS read-then-write.
  */
-async function transitionPositionState({ symbol, expectedState, newState, tradeId = null }) {
+async function transitionPositionState({ symbol, expectedState, newState, tradeId = null, mode = PAPER }) {
   const { data, error } = await supabase.rpc('set_position_state', {
     p_symbol: symbol,
     p_expected_state: expectedState,
     p_new_state: newState,
     p_trade_id: tradeId,
+    p_mode: mode,
   });
 
   if (error) {
@@ -367,7 +466,7 @@ async function transitionPositionState({ symbol, expectedState, newState, tradeI
  * been placed and priced. Keeping the two apart is the whole point of
  * migration 001 — conflating them is what inverted every PUT trade's P&L.
  */
-async function insertTrade({ alertId, signalType, symbol, instrumentToken, quantity, entrySpot, scoreAtEntry }) {
+async function insertTrade({ alertId, signalType, symbol, instrumentToken, quantity, entrySpot, scoreAtEntry, mode = PAPER }) {
   const { data, error } = await supabase
     .from('trades')
     .insert({
@@ -378,6 +477,7 @@ async function insertTrade({ alertId, signalType, symbol, instrumentToken, quant
       quantity,
       entry_spot: entrySpot,
       score_at_entry: scoreAtEntry,
+      mode,
       status: 'PENDING',
     })
     .select('id')
@@ -514,10 +614,11 @@ async function listWebhookLogs({ processed, limit = 50, offset = 0 } = {}) {
 // admin dashboard queries (read-only, used by routes/admin.js)
 // ----------------------------------------------------------------------------
 
-async function listTrades({ status, limit = 50, offset = 0 } = {}) {
+async function listTrades({ status, limit = 50, offset = 0, mode = PAPER } = {}) {
   let query = supabase
     .from('trades')
     .select('*', { count: 'exact' })
+    .eq('mode', mode)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
@@ -583,13 +684,14 @@ async function insertPremiumSample(tradeId, premium, candleAt) {
  * in UTC, where "today" starts at 05:30 IST and the first 5.5 hours of every
  * session would be counted against the previous day.
  */
-async function countTradesToday(symbol) {
+async function countTradesToday(symbol, mode = PAPER) {
   const startOfDayIst = new Date(`${marketClock.istDate()}T00:00:00+05:30`).toISOString();
 
   const { count, error } = await supabase
     .from('trades')
     .select('id', { count: 'exact', head: true })
     .eq('symbol', symbol)
+    .eq('mode', mode)
     .in('status', ['PENDING', 'FILLED', 'CLOSED'])
     .gte('created_at', startOfDayIst);
 
@@ -603,11 +705,12 @@ async function countTradesToday(symbol) {
 }
 
 /** Most recently closed trade for a symbol — drives the re-entry cooldown. */
-async function getLastClosedTrade(symbol) {
+async function getLastClosedTrade(symbol, mode = PAPER) {
   const { data, error } = await supabase
     .from('trades')
     .select('id, signal_type, closed_reason, closed_at, pnl')
     .eq('symbol', symbol)
+    .eq('mode', mode)
     .eq('status', 'CLOSED')
     .not('closed_at', 'is', null)
     .order('closed_at', { ascending: false })
@@ -621,10 +724,11 @@ async function getLastClosedTrade(symbol) {
   return data;
 }
 
-async function listRunningTrades() {
+async function listRunningTrades(mode = PAPER) {
   const { data, error } = await supabase
     .from('trades')
     .select('*')
+    .eq('mode', mode)
     .in('status', ['PENDING', 'FILLED'])
     .order('created_at', { ascending: false });
 
@@ -638,11 +742,12 @@ async function listRunningTrades() {
 const CLOSED_TRADE_COLUMNS =
   'id, symbol, signal_type, pnl, quantity, entry_price, exit_price, entry_spot, exit_spot, closed_reason, created_at, closed_at';
 
-async function getClosedTradesSince(sinceIso) {
+async function getClosedTradesSince(sinceIso, mode = PAPER) {
   const run = (columns) => {
     let query = supabase
       .from('trades')
       .select(columns)
+      .eq('mode', mode)
       .eq('status', 'CLOSED')
       .order('closed_at', { ascending: true });
     if (sinceIso) query = query.gte('closed_at', sinceIso);
@@ -668,10 +773,11 @@ async function getClosedTradesSince(sinceIso) {
   return data;
 }
 
-async function listPositionStates() {
+async function listPositionStates(mode = PAPER) {
   const { data, error } = await supabase
     .from('position_state')
     .select('*')
+    .eq('mode', mode)
     .order('symbol', { ascending: true });
 
   if (error) {
@@ -705,6 +811,9 @@ module.exports = {
   insertPremiumSample,
   getRuntimeConfig,
   setRuntimeConfig,
+  getBrokerToken,
+  saveBrokerToken,
+  recordBrokerTokenError,
   countTradesToday,
   getLastClosedTrade,
   markTradeFailed,

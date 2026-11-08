@@ -1,7 +1,7 @@
 {
   "name": "tradingview-upstox-webhook-bridge",
   "version": "1.0.0",
-  "description": "Webhook bridge connecting TradingView Pine Script alerts to the Upstox Sandbox API for paper trading (Bank Nifty options).",
+  "description": "Webhook bridge connecting TradingView Pine Script alerts to Upstox for paper (sandbox) and live trading of Bank Nifty options.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

@@ -8,8 +8,8 @@ async function listTrades(req, res, next) {
     const status = req.query.status || undefined;
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
     const offset = parseInt(req.query.offset, 10) || 0;
-    const { trades, total } = await supabaseService.listTrades({ status, limit, offset });
-    res.json({ status: 'ok', trades, total });
+    const { trades, total } = await supabaseService.listTrades({ status, limit, offset, mode: req.mode });
+    res.json({ status: 'ok', mode: req.mode, trades, total });
   } catch (err) {
     next(err);
   }
@@ -29,7 +29,7 @@ async function listTrades(req, res, next) {
  */
 async function listRunningTrades(req, res, next) {
   try {
-    const trades = await supabaseService.listRunningTrades();
+    const trades = await supabaseService.listRunningTrades(req.mode);
 
     const marked = await Promise.all(
       trades.map(async (t) => {
@@ -54,7 +54,7 @@ async function listRunningTrades(req, res, next) {
       })
     );
 
-    res.json({ status: 'ok', trades: marked });
+    res.json({ status: 'ok', mode: req.mode, trades: marked });
   } catch (err) {
     next(err);
   }

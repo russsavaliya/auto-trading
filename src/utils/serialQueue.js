@@ -45,9 +45,4 @@ function enqueue(key, task) {
   return next;
 }
 
-/** Test/diagnostic helper — how many symbols currently have work queued. */
-function pendingKeys() {
-  return [...chains.keys()];
-}
-
-module.exports = { enqueue, pendingKeys };
+module.exports = { enqueue };

@@ -7,6 +7,7 @@ const tradeExecutor = require('./tradeExecutor');
 const marketData = require('./marketData');
 const serialQueue = require('../utils/serialQueue');
 const marketClock = require('../utils/marketClock');
+const modes = require('../config/modes');
 
 /**
  * Books profits and caps losses by watching the OPTION PREMIUM.
@@ -93,7 +94,7 @@ async function checkTrade(trade) {
     // position — the single most dangerous failure this service has. Say so
     // loudly rather than looking like a normal quiet poll.
     logger.error(
-      { tradeId: trade.id, symbol: trade.symbol, instrumentToken: trade.instrument_token },
+      { tradeId: trade.id, symbol: trade.symbol, instrumentToken: trade.instrument_token, mode: trade.mode },
       'NO PRICE for an open position — stop-loss and trailing stop are NOT active for it this tick'
     );
     return;
@@ -134,6 +135,7 @@ async function checkTrade(trade) {
       heldMinutes: heldMinutes.toFixed(0),
       unrealised,
       reason,
+      mode: trade.mode,
     },
     `Premium exit rule fired: ${reason}`
   );
@@ -141,7 +143,7 @@ async function checkTrade(trade) {
   // Same queue the webhooks and the square-off use, so this can never
   // interleave with an alert being processed for the same symbol.
   const result = await serialQueue.enqueue(trade.symbol, () =>
-    tradeExecutor.closePosition({ symbol: trade.symbol, reason })
+    tradeExecutor.closePosition({ symbol: trade.symbol, reason, mode: trade.mode || modes.PAPER })
   );
 
   if (result.ok) {
@@ -154,16 +156,21 @@ async function checkTrade(trade) {
 async function tick() {
   if (!marketClock.isMarketOpen(Date.now(), config)) return;
 
-  try {
-    const open = await supabaseService.listRunningTrades();
-    for (const trade of open) {
-      if (trade.status !== 'FILLED') continue;
-      await checkTrade(trade).catch((err) =>
-        logger.error({ err: err.message, tradeId: trade.id }, 'Premium exit check failed for trade')
-      );
+  // Every environment is swept, in its own try/catch. A live position whose
+  // token has expired must not stop the paper stop-losses from running — the
+  // exit rules are the only thing bounding either book's downside.
+  for (const mode of modes.MODES) {
+    try {
+      const open = await supabaseService.listRunningTrades(mode);
+      for (const trade of open) {
+        if (trade.status !== 'FILLED') continue;
+        await checkTrade(trade).catch((err) =>
+          logger.error({ err: err.message, tradeId: trade.id, mode }, 'Premium exit check failed for trade')
+        );
+      }
+    } catch (err) {
+      logger.error({ err: err.message, mode }, 'Position monitor tick failed for mode');
     }
-  } catch (err) {
-    logger.error({ err: err.message }, 'Position monitor tick failed');
   }
 }
 

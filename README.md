@@ -1,9 +1,11 @@
-# TradingView → Upstox Sandbox Webhook Bridge
+# TradingView → Upstox Webhook Bridge
 
 Receives TradingView Pine Script alerts for a Bank Nifty CALL/PUT options
-strategy and places matching paper-trading orders against the **Upstox
-Sandbox API**. Built for safety first: idempotent alert handling, a
-persisted position state machine, an always-on audit log, and a kill switch.
+strategy and places matching orders in two independent environments: **paper**
+against the Upstox Sandbox API, and **live** against the real Upstox API (off
+until deliberately enabled — see [GO_LIVE.md](docs/GO_LIVE.md)). Built for
+safety first: idempotent alert handling, a persisted position state machine,
+an always-on audit log, and a kill switch per environment.
 
 > **Upgrading from before 12 Aug 2026?** Read [RUNBOOK.md](docs/RUNBOOK.md) first —
 > there is a required database migration and the meaning of
@@ -76,6 +78,8 @@ scripts/positions.js               Inspect / close / force-flat a stuck position
 scripts/backfill-premiums.js       Repair historical P&L from real premiums
 scripts/replicate-indicator.js     Re-derive the Pine score from stored candles
 scripts/test-exit-rules.js         Exit-rule checks incl. the morning-neutrality regression
+scripts/replay-signals.js          Fill days TradingView sent nothing: replays Pine + bridge on
+                                   Upstox/NSE data, writes PAPER trades (dry run by default)
 
 strategy/pineScript.js             The Pine indicator that fires the alerts
 strategy/pineStrategy.js           Same signal wrapped for the Strategy Tester
@@ -110,7 +114,9 @@ happened during the 6–12 Aug 2026 paper run.
 ## 1. Supabase schema
 
 Run [sql/schema.sql](sql/schema.sql) once in the Supabase SQL editor (or via
-`psql`). It creates:
+`psql`), then every file in [sql/migrations/](sql/migrations/) in numeric order —
+the server refuses to start its schedulers against a database missing any of
+them. `schema.sql` creates:
 
 - `webhook_log` — every incoming webhook, including rejected/duplicate ones
 - `processed_alerts` — the idempotency ledger (`alert_id` is the primary key)
@@ -279,7 +285,25 @@ row written to `trades`.
 - Pick a strong `WEBHOOK_SECRET` and put it in the TradingView alert URL's
   `?token=` query param
 - Deploy the server somewhere TradingView can reach it over HTTPS (TradingView
-  alerts cannot call `localhost`) — e.g. a small VPS, Render, Fly.io, etc.,
-  with `NODE_ENV=production`
+  alerts cannot call `localhost`) with a static outbound IP for live orders —
+  see section 7 for the current production setup
 - Set `DEFAULT_QUANTITY` (or always send `quantity` in the alert) to match
   your intended lot size before going live
+
+## 7. Production deployment
+
+Runs on a DigitalOcean droplet in Bangalore (`blr1`), chosen for the static IP
+SEBI requires on every live order. Details and the IP registration are in
+[GO_LIVE.md §1](docs/GO_LIVE.md).
+
+| | |
+|---|---|
+| URL | `https://139-59-52-230.sslip.io` (Caddy, automatic HTTPS) |
+| TradingView webhook | `https://139-59-52-230.sslip.io/webhook/tradingview?token=<WEBHOOK_SECRET>` |
+| Process | systemd unit `bridge`, user `app`, code in `/opt/bridge`, Node 24 |
+| Secrets | `/opt/bridge/.env` on the server only — never in the repo |
+| Deploy | `bash scripts/deploy-do.sh` — refuses while the market is open |
+| Logs | `ssh -i ~/.ssh/do_trading root@64.227.153.201 journalctl -u bridge -f` |
+
+Node 22 or newer is required: `@supabase/supabase-js` needs the native
+`WebSocket` that Node 20 does not have, and crashes at startup without it.

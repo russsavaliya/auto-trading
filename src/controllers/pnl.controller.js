@@ -6,8 +6,8 @@ const charges = require('../services/charges');
 
 async function getSummary(req, res, next) {
   try {
-    const closedTrades = await supabaseService.getClosedTradesSince(null);
-    const runningTrades = await supabaseService.listRunningTrades();
+    const closedTrades = await supabaseService.getClosedTradesSince(null, req.mode);
+    const runningTrades = await supabaseService.listRunningTrades(req.mode);
 
     // A trade whose premium could not be determined has pnl = null. It is
     // excluded from every figure below rather than silently counted as zero,
@@ -37,6 +37,7 @@ async function getSummary(req, res, next) {
 
     res.json({
       status: 'ok',
+      mode: req.mode,
       totalPnl: Number(totalPnl.toFixed(2)),
       todayPnl: Number(todayPnl.toFixed(2)),
       totalCharges: Number(totalCharges.toFixed(2)),
@@ -94,16 +95,6 @@ function bucketClosedTrades(closedTrades, keyLength) {
     .sort((a, b) => a.key.localeCompare(b.key));
 }
 
-async function getMonthly(req, res, next) {
-  try {
-    const closedTrades = await supabaseService.getClosedTradesSince(null);
-    const months = bucketClosedTrades(closedTrades, 7).map(({ key, ...rest }) => ({ month: key, ...rest }));
-    res.json({ status: 'ok', months });
-  } catch (err) {
-    next(err);
-  }
-}
-
 /**
  * Per-trading-day P&L plus the running cumulative total.
  *
@@ -114,7 +105,7 @@ async function getMonthly(req, res, next) {
  */
 async function getDaily(req, res, next) {
   try {
-    const closedTrades = await supabaseService.getClosedTradesSince(null);
+    const closedTrades = await supabaseService.getClosedTradesSince(null, req.mode);
     const buckets = bucketClosedTrades(closedTrades, 10);
 
     let running = 0;
@@ -124,7 +115,7 @@ async function getDaily(req, res, next) {
       return { date: key, ...rest, cumulative: Number(running.toFixed(2)) };
     });
 
-    res.json({ status: 'ok', days });
+    res.json({ status: 'ok', mode: req.mode, days });
   } catch (err) {
     next(err);
   }
@@ -176,7 +167,7 @@ function tradeCost(t) {
  */
 async function getReport(req, res, next) {
   try {
-    const closedTrades = await supabaseService.getClosedTradesSince(null);
+    const closedTrades = await supabaseService.getClosedTradesSince(null, req.mode);
     const priced = closedTrades.filter((t) => t.pnl !== null && t.pnl !== undefined);
 
     const totals = { grossPnl: 0, charges: 0, buyTurnover: 0, sellTurnover: 0 };
@@ -239,6 +230,7 @@ async function getReport(req, res, next) {
 
     res.json({
       status: 'ok',
+      mode: req.mode,
       totals: {
         grossPnl: r2(totals.grossPnl),
         charges: r2(totals.charges),
@@ -265,5 +257,5 @@ async function getReport(req, res, next) {
   }
 }
 
-module.exports = { getSummary, getMonthly, getDaily, getReport };
+module.exports = { getSummary, getDaily, getReport };
 

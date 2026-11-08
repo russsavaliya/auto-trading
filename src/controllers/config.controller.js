@@ -2,6 +2,9 @@
 
 const supabaseService = require('../services/supabaseService');
 const charges = require('../services/charges');
+const upstoxAuth = require('../services/upstoxAuth');
+const modes = require('../config/modes');
+const envConfig = require('../config/env');
 
 /**
  * Backs the Settings page.
@@ -14,15 +17,31 @@ const charges = require('../services/charges');
  */
 async function getConfig(req, res, next) {
   try {
-    const { reachable, tradingEnabled } = await supabaseService.getAppConfigStatus();
+    const mode = req.mode || modes.PAPER;
+    const { reachable, tradingEnabled } = await supabaseService.getAppConfigStatus(mode);
     if (!reachable) {
-      res.status(503).json({ status: 'error', message: 'Could not read app_config' });
+      res.status(503).json({ status: 'error', message: `Could not read app_config for mode "${mode}"` });
       return;
     }
-    const runtime = await supabaseService.getRuntimeConfig();
+    const runtime = await supabaseService.getRuntimeConfig(mode);
+
+    // Live-only. Reported even when the caller asked about paper, because the
+    // Settings page shows one connection panel regardless of which environment
+    // is being viewed — and a token quietly expiring is the failure this whole
+    // build exists to make visible.
+    const liveToken = await upstoxAuth.tokenStatus(modes.LIVE);
 
     res.json({
       status: 'ok',
+      mode,
+      live: {
+        // Master switch from the environment; separate from the per-mode kill
+        // switch, and both have to be on before a real order can go out.
+        enabled: envConfig.liveEnabled,
+        token: liveToken,
+        algo_name: envConfig.upstoxAlgoName,
+        order_host: modes.resolve(modes.LIVE).orderBaseUrl,
+      },
       trading_enabled: tradingEnabled,
       max_trades_per_day: runtime.maxTradesPerDay,
       re_entry_cooldown_enabled: runtime.reEntryCooldownEnabled,
@@ -58,11 +77,28 @@ async function updateConfig(req, res, next) {
     const patch = {};
     const errors = [];
 
+    const mode = req.mode || modes.PAPER;
+
     if (body.trading_enabled !== undefined) {
       if (typeof body.trading_enabled !== 'boolean') {
         errors.push('trading_enabled must be a boolean');
+      } else if (body.trading_enabled && mode === modes.LIVE) {
+        // Turning LIVE on is the one setting that starts spending real money,
+        // so it is refused unless the plumbing behind it actually works. A
+        // switch that flips green while every order 401s is worse than one
+        // that refuses and says why.
+        const missing = upstoxAuth.liveCredentialsMissing();
+        if (!envConfig.liveEnabled) {
+          errors.push('LIVE_TRADING_ENABLED is off in the environment — live cannot be switched on from here');
+        } else if (missing.length) {
+          errors.push(`live is not configured: missing ${missing.join(', ')}`);
+        } else if (!(await upstoxAuth.getAccessToken(modes.LIVE))) {
+          errors.push('no valid live access token — connect Upstox first');
+        } else {
+          await supabaseService.setTradingEnabled(true, mode);
+        }
       } else {
-        await supabaseService.setTradingEnabled(body.trading_enabled);
+        await supabaseService.setTradingEnabled(body.trading_enabled, mode);
       }
     }
 
@@ -95,7 +131,7 @@ async function updateConfig(req, res, next) {
       // "Internal server error" would send someone reading server logs when
       // the fix is one SQL file. The Settings page disables these fields in
       // this state; this is the guard for anything that bypasses the UI.
-      const current = await supabaseService.getRuntimeConfig();
+      const current = await supabaseService.getRuntimeConfig(mode);
       if (current.source === 'env-fallback') {
         res.status(409).json({
           status: 'error',
@@ -105,7 +141,7 @@ async function updateConfig(req, res, next) {
         });
         return;
       }
-      await supabaseService.setRuntimeConfig(patch);
+      await supabaseService.setRuntimeConfig(patch, mode);
     }
 
     // Respond with the state as it now actually is, read back from the

@@ -3,6 +3,7 @@
 const config = require('../config/env');
 const logger = require('../utils/logger');
 const charges = require('./charges');
+const modes = require('../config/modes');
 const supabaseService = require('./supabaseService');
 const positionState = require('./positionState');
 const upstoxService = require('./upstoxService');
@@ -30,18 +31,29 @@ const INDEX_KEY = { BANKNIFTY: 'NSE_INDEX|Nifty Bank', NIFTY: 'NSE_INDEX|Nifty 5
  * "open pending", average_price 0), so in practice this falls through to a
  * mark against the option's real traded price plus a slippage allowance.
  */
-async function priceFill({ orderId, instrumentToken, transactionType }) {
-  const broker = await upstoxService.getOrderFill(orderId);
+async function priceFill({ orderId, instrumentToken, transactionType, mode = modes.PAPER }) {
+  const broker = await upstoxService.getOrderFill(orderId, mode);
 
   if (broker.isFilled) {
-    logger.info({ orderId, averagePrice: broker.averagePrice }, 'Using real broker fill price');
+    logger.info({ orderId, averagePrice: broker.averagePrice, mode }, 'Using real broker fill price');
     return { premium: broker.averagePrice, source: 'broker_fill', brokerStatus: broker.brokerStatus };
+  }
+
+  // On live, falling through to a mark means recording an ESTIMATE on a real
+  // trade. It is still better than recording nothing — the position exists
+  // either way — but it must never pass silently, because every figure
+  // derived from it is then an approximation of real money.
+  if (modes.resolve(mode).realMoney) {
+    logger.error(
+      { orderId, instrumentToken, brokerStatus: broker.brokerStatus },
+      'LIVE fill unavailable — pricing this real trade from a market mark'
+    );
   }
 
   const paper = await marketData.getPaperFill({ instrumentToken, transactionType });
   if (!paper) {
     logger.error(
-      { orderId, instrumentToken, brokerStatus: broker.brokerStatus },
+      { orderId, instrumentToken, brokerStatus: broker.brokerStatus, mode },
       'Could not price this fill — no broker fill and no candle data. Trade will be recorded unpriced.'
     );
     return { premium: null, source: 'unpriced', brokerStatus: broker.brokerStatus };
@@ -79,10 +91,10 @@ async function currentSpot(symbol) {
  */
 const RULE_EXITS = new Set(['stop_loss', 'trailing_stop', 'time_stop']);
 
-async function blockedByRecentRuleExit(symbol, signalType, runtime) {
+async function blockedByRecentRuleExit(symbol, signalType, runtime, mode = modes.PAPER) {
   if (!runtime.reEntryCooldownEnabled || runtime.reEntryCooldownMinutes <= 0) return null;
 
-  const last = await supabaseService.getLastClosedTrade(symbol);
+  const last = await supabaseService.getLastClosedTrade(symbol, mode);
   if (!last || !RULE_EXITS.has(last.closed_reason)) return null;
 
   // Only the same direction is blocked — a genuine reversal is still allowed.
@@ -106,30 +118,30 @@ async function blockedByRecentRuleExit(symbol, signalType, runtime) {
  * Checked before the instrument is resolved and before any row is written, so
  * a capped signal costs nothing but a webhook_log line.
  */
-async function blockedByDailyCap(symbol, runtime) {
+async function blockedByDailyCap(symbol, runtime, mode = modes.PAPER) {
   if (runtime.maxTradesPerDay <= 0) return null;
 
-  const takenToday = await supabaseService.countTradesToday(symbol);
+  const takenToday = await supabaseService.countTradesToday(symbol, mode);
   if (takenToday < runtime.maxTradesPerDay) return null;
 
   return `daily_cap_reached: ${takenToday} of ${runtime.maxTradesPerDay} trades already taken today`;
 }
 
-async function openPosition({ alertId, signalType, symbol, spot, score, quantity, product, orderType, instrumentToken }) {
+async function openPosition({ alertId, signalType, symbol, spot, score, quantity, product, orderType, instrumentToken, mode = modes.PAPER }) {
   // Read once and thread it through, rather than letting each gate hit the
   // database on its own — both run on every entry, and a cap that changed
   // between the two checks would be a genuinely confusing bug to chase.
-  const runtime = await supabaseService.getRuntimeConfig();
+  const runtime = await supabaseService.getRuntimeConfig(mode);
 
-  const capped = await blockedByDailyCap(symbol, runtime);
+  const capped = await blockedByDailyCap(symbol, runtime, mode);
   if (capped) {
-    logger.warn({ symbol, signalType, capped }, 'Entry refused: daily trade cap reached');
+    logger.warn({ symbol, signalType, capped, mode }, 'Entry refused: daily trade cap reached');
     return { ok: false, reason: capped };
   }
 
-  const cooldown = await blockedByRecentRuleExit(symbol, signalType, runtime);
+  const cooldown = await blockedByRecentRuleExit(symbol, signalType, runtime, mode);
   if (cooldown) {
-    logger.warn({ symbol, signalType, cooldown }, 'Entry refused: cooling off after a risk-rule exit');
+    logger.warn({ symbol, signalType, cooldown, mode }, 'Entry refused: cooling off after a risk-rule exit');
     return { ok: false, reason: cooldown };
   }
 
@@ -154,9 +166,10 @@ async function openPosition({ alertId, signalType, symbol, spot, score, quantity
     quantity,
     entrySpot: spot,
     scoreAtEntry: score,
+    mode,
   });
 
-  const reservation = await positionState.reserveEntry({ symbol, signalType, tradeId });
+  const reservation = await positionState.reserveEntry({ symbol, signalType, tradeId, mode });
   if (!reservation.success) {
     logger.warn({ symbol, signalType, currentState: reservation.previousState }, 'Entry rejected: already in a position');
     await supabaseService.markTradeFailed(tradeId, {
@@ -173,9 +186,10 @@ async function openPosition({ alertId, signalType, symbol, spot, score, quantity
       product,
       orderType,
       price: spot,
+      mode,
     });
 
-    const fill = await priceFill({ orderId, instrumentToken: token, transactionType: 'BUY' });
+    const fill = await priceFill({ orderId, instrumentToken: token, transactionType: 'BUY', mode });
     await supabaseService.markTradeOpen(tradeId, {
       upstoxOrderId: orderId,
       entryPremium: fill.premium,
@@ -184,14 +198,14 @@ async function openPosition({ alertId, signalType, symbol, spot, score, quantity
     });
 
     logger.info(
-      { tradeId, orderId, symbol, signalType, entryPremium: fill.premium, fillSource: fill.source },
+      { tradeId, orderId, symbol, signalType, entryPremium: fill.premium, fillSource: fill.source, mode },
       'Position opened'
     );
     return { ok: true, tradeId, entryPremium: fill.premium };
   } catch (err) {
-    logger.error({ err: err.message, tradeId, symbol, signalType }, 'Entry order failed — rolling back reserved state');
+    logger.error({ err: err.message, tradeId, symbol, signalType, mode }, 'Entry order failed — rolling back reserved state');
     await supabaseService.markTradeFailed(tradeId, { errorMessage: err.message });
-    await positionState.rollbackEntry({ symbol, signalType });
+    await positionState.rollbackEntry({ symbol, signalType, mode });
     return { ok: false, reason: `order_failed: ${err.message}`, tradeId };
   }
 }
@@ -203,25 +217,25 @@ async function openPosition({ alertId, signalType, symbol, spot, score, quantity
  * a mismatched exit (a CALL_EXIT arriving while IN_PUT) is correctly rejected.
  * Omit it — as the square-off job does — to close whichever side is open.
  */
-async function closePosition({ symbol, signalType = null, spot = null, score = null, product, orderType, reason = 'signal' }) {
+async function closePosition({ symbol, signalType = null, spot = null, score = null, product, orderType, reason = 'signal', mode = modes.PAPER }) {
   let exitSignal = signalType;
 
   if (!exitSignal) {
-    const state = await positionState.getState(symbol);
+    const state = await positionState.getState(symbol, mode);
     exitSignal = EXIT_SIGNAL_FOR_STATE[state.state];
     if (!exitSignal) return { ok: false, reason: `nothing_to_close: state=${state.state}` };
   }
 
-  const reservation = await positionState.reserveExit({ symbol, signalType: exitSignal });
+  const reservation = await positionState.reserveExit({ symbol, signalType: exitSignal, mode });
   if (!reservation.success) {
-    logger.warn({ symbol, signalType: exitSignal, currentState: reservation.previousState }, 'Exit rejected: not in a matching position');
+    logger.warn({ symbol, signalType: exitSignal, currentState: reservation.previousState, mode }, 'Exit rejected: not in a matching position');
     return { ok: false, reason: `invalid_state: not in position (current=${reservation.previousState})` };
   }
 
   const tradeId = reservation.previousTradeId;
   if (!tradeId) {
-    logger.error({ symbol, signalType: exitSignal }, 'Exit reserved but no linked trade_id — reverting state');
-    await positionState.rollbackExit({ symbol, signalType: exitSignal, tradeId: null });
+    logger.error({ symbol, signalType: exitSignal, mode }, 'Exit reserved but no linked trade_id — reverting state');
+    await positionState.rollbackExit({ symbol, signalType: exitSignal, tradeId: null, mode });
     return { ok: false, reason: 'missing_trade_reference' };
   }
 
@@ -235,9 +249,10 @@ async function closePosition({ symbol, signalType = null, spot = null, score = n
       product: product || config.defaultProduct,
       orderType: orderType || config.defaultOrderType,
       price: spot || 0,
+      mode,
     });
 
-    const fill = await priceFill({ orderId, instrumentToken: trade.instrument_token, transactionType: 'SELL' });
+    const fill = await priceFill({ orderId, instrumentToken: trade.instrument_token, transactionType: 'SELL', mode });
     const exitSpot = spot != null ? spot : await currentSpot(symbol);
 
     // P&L comes from PREMIUM only. If either leg is unpriced we store null
@@ -282,14 +297,15 @@ async function closePosition({ symbol, signalType = null, spot = null, score = n
         charges: cost ? cost.total : null,
         netPnl: charges.applyToPnl(pnl, cost ? cost.total : null),
         reason,
+        mode,
       },
       'Position closed'
     );
     return { ok: true, tradeId, pnl };
   } catch (err) {
-    logger.error({ err: err.message, tradeId, symbol }, 'Exit order failed — rolling back reserved state');
+    logger.error({ err: err.message, tradeId, symbol, mode }, 'Exit order failed — rolling back reserved state');
     await supabaseService.recordExitFailure(tradeId, { errorMessage: err.message });
-    await positionState.rollbackExit({ symbol, signalType: exitSignal, tradeId });
+    await positionState.rollbackExit({ symbol, signalType: exitSignal, tradeId, mode });
     return { ok: false, reason: `exit_order_failed: ${err.message}`, tradeId };
   }
 }

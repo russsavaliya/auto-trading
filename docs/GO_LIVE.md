@@ -10,22 +10,78 @@ hai — **wo section skip mat karna.**
 
 ---
 
+## Status — updated 9 Sep 2026
+
+Paper and live now run **side by side** in one deployment. One TradingView
+alert fans out to both environments; each keeps its own position state, daily
+cap, kill switch and trades. A live outage cannot touch a paper position.
+
+### Built
+
+| Piece | Where |
+|---|---|
+| `mode` (paper/live) through the whole data model | `sql/migrations/005_paper_live_modes.sql` |
+| Per-mode config, kill switch, daily cap | `app_config`, one row per mode |
+| Live OAuth flow + daily token storage | `src/services/upstoxAuth.js`, `broker_tokens` |
+| Per-request token (no more module-load baking) | `src/services/upstoxService.js` |
+| Two live hosts (order vs data) | `src/config/modes.js` |
+| Fill polling on live | `getOrderFill`, 6 attempts |
+| `X-Algo-Name` header | `modes.orderHeaders()` |
+| Token expiry in `/health` | `src/controllers/health.controller.js` |
+| Dashboard Paper/Live switch + red live band | `Topbar`, `useTradingMode` |
+| One-click reconnect + countdown | Settings -> Upstox connection |
+
+### Progress — updated 8 Nov 2026
+
+| # | Kaam | Status |
+|---|---|---|
+| 1 | Run migration 005 (**before** deploying this code) | ✅ Done |
+| 2 | Static IP registered with Upstox | ✅ Done — DigitalOcean droplet, see §1 |
+| 3 | Provide the four credentials below | ✅ Set on the server; `LIVE_TRADING_ENABLED=true`, live kill switch OFF |
+| 4 | First daily Upstox login from Settings -> Upstox connection | Pending |
+| 5 | 1–2 weeks of daily logins with the live kill switch OFF | Pending |
+| 6 | Live kill switch ON, cap 1/day | Pending |
+
+> **Deploy order matters.** Every query now filters on `mode`. Against a
+> database without migration 005 the bridge **fails closed** — it logs
+> `SCHEMA OUT OF DATE`, refuses to start the schedulers and places no orders in
+> either environment. Run the migration first, then deploy.
+
+### The four values to send
+
+| Variable | Kahan se |
+|---|---|
+| `UPSTOX_API_KEY` | Upstox developer console -> My Apps |
+| `UPSTOX_API_SECRET` | same app |
+| `UPSTOX_REDIRECT_URI` | must match the app EXACTLY: `https://139-59-52-230.sslip.io/api/upstox/callback` |
+| `UPSTOX_ALGO_NAME` | the Algo App's **name**, not its ID |
+
+Then `LIVE_TRADING_ENABLED=true` when the static IP is sorted — and the live
+kill switch on Settings stays off until you deliberately turn it on. Both must
+be on before a real order can go out.
+
+There is deliberately **no live access token** in the environment. It expires
+at 03:30 IST daily, so it lives in `broker_tokens` and is minted from
+Settings -> Upstox connection. One click per trading day.
+
+---
+
 ## Order of operations
 
 Ye kramm se karna. 2 aur 3 ke bina 4 ka koi matlab nahi.
 
 | # | Kaam | Blocker? |
 |---|---|---|
-| 1 | Static IP arrange karo aur Upstox mein register karo | 🚫 Haan |
-| 2 | Daily token refresh pipeline banao | 🚫 Haan |
-| 3 | Code changes (neeche list) | 🚫 Haan |
-| 4 | Config values badlo | — |
+| 1 | Static IP arrange karo aur Upstox mein register karo | ✅ Done |
+| 2 | Daily token refresh pipeline banao | ✅ Done |
+| 3 | Code changes (neeche list) | ✅ Done |
+| 4 | Config values badlo | ✅ Done |
 | 5 | `TRADING_ENABLED=false` pe 1-2 hafte infra chalao | — |
 | 6 | Cap 1/day pe switch on | — |
 
 ---
 
-## 1. 🚫 Static IP — sabse pehla blocker
+## 1. ✅ Static IP — done 8 Nov 2026
 
 SEBI ka static-IP mandate **1 April 2026 se enforce** ho raha hai. Har API
 order call ek registered static IP se aana chahiye.
@@ -35,8 +91,25 @@ Upstox ke circular se:
 > All the API orders must originate from a registered Static IP... any order
 > requests from unregistered IPs will be rejected.
 
-**Abhi bridge Render pe hai, jahan dynamic IP hai. Live jaate hi har order
-reject hoga.** Ye code ka problem nahi, infrastructure ka hai.
+**Render pe dynamic IP tha, isliye bridge ko DigitalOcean droplet pe le gaye**
+(Bangalore `blr1` — DigitalOcean pe Mumbai region nahi hai). Render service
+suspended hai; dono ek saath kabhi mat chalana — same database pe dono ke
+square-off / stop-loss schedulers ek hi position pe exit bhejenge.
+
+| | |
+|---|---|
+| Primary IP (Upstox mein registered) | `64.227.153.201` — droplet ka apna IP; saara outbound traffic isi se jaata hai |
+| Secondary IP (registered) | `139.59.52.230` — DigitalOcean Reserved IP |
+| Public URL (HTTPS, Caddy) | `https://139-59-52-230.sslip.io` |
+
+Droplet ka IP reboot, power-off, resize aur rebuild mein same rehta hai — sirf
+droplet **destroy** karne pe jaata hai. Reserved IP by default sirf incoming
+traffic ke liye hai; isliye wo backup ke taur pe registered hai, taaki agar kabhi
+droplet dobara banana pade to outbound usi se route karke IP change (aur hafte
+ka lock) bacha sakein.
+
+Deploy: `bash scripts/deploy-do.sh` (market khula ho to mana kar deta hai).
+Logs: `ssh -i ~/.ssh/do_trading root@64.227.153.201 journalctl -u bridge -f`.
 
 Do constraints jo planning badal dete hain:
 
@@ -47,14 +120,6 @@ Do constraints jo planning badal dete hain:
 
 Restriction sirf write APIs pe hai — place / modify / cancel / multi-order /
 GTT / exit positions. Read-only APIs pe nahi.
-
-### Options
-
-| Option | Baat |
-|---|---|
-| Static IP wala VPS | Sabse seedha. Render se migrate karna padega. |
-| Static-IP proxy (QuotaGuard type) | Render pe rehne deta hai, par ek aur failure point |
-| Render + reserved IP | Check karo ki plan support karta hai ya nahi |
 
 > Agar aapka algo **10 orders/second se zyada** karta to SEBI registration aur
 > exchange se Algo ID chahiye hota. Aap 2 trades/**din** karte ho — us category
@@ -100,8 +165,10 @@ Live mein order placement aur order details **alag hosts** pe hain:
 | Order place | `https://api-hft.upstox.com/v2/order/place` |
 | Order details | `https://api.upstox.com/v2/order/details` |
 
-[`upstoxService.js:9`](../src/services/upstoxService.js#L9) ek hi `baseURL`
-dono ke liye use karta hai — **ye tootega.**
+**✅ Done.** `config/modes.js` ab dono hosts alag rakhta hai aur
+`upstoxService` request ke type (order vs data) ke hisaab se chunta hai. Dono
+env se overridable hain (`UPSTOX_LIVE_ORDER_BASE_URL`,
+`UPSTOX_LIVE_API_BASE_URL`).
 
 > ⚠️ Ye do alag doc pages se aaya hai jo aapas mein consistent nahi hain
 > (place-order page `api-hft` dikhata hai, overview page nahi). Go-live se
@@ -112,9 +179,9 @@ dono ke liye use karta hai — **ye tootega.**
 [`upstoxService.js:9-16`](../src/services/upstoxService.js#L9-L16) mein axios
 client module load pe banta hai aur token headers mein baked ho jaata hai.
 
-Daily rotation ke saath iska matlab: **roz server restart**, ya per-request
-token read karne ke liye refactor. Sandbox mein ye 30 din mein ek baar ki baat
-thi — ab roz ki hai. **Ab ye cosmetic nahi, critical hai.**
+**✅ Done.** Module-level axios client hata diya gaya hai. Har request pe
+token `services/upstoxAuth.js` se aata hai — live ke liye database se, paper ke
+liye env se. Restart ki zarurat nahi.
 
 ### 3.3 Fill race — live mein galat price record hogi
 
@@ -127,11 +194,15 @@ by design. Live mein MARKET order fill hone mein kuch sau ms lagte hain. Us
 waqt `isFilled` false hoga aur code **paper mark record kar lega, asli fill
 nahi.**
 
-Chhota poll chahiye (thodi der, kuch attempts) fill ka intezaar karne ke liye.
+**✅ Done.** Live ab 6 baar poll karta hai (400ms apart) fill ke liye, aur
+agar phir bhi na mile to `ERROR` log karta hai ki ye trade **mark** se price ho
+rahi hai, real fill se nahi. Paper pe ek hi attempt — sandbox kabhi fill karta
+hi nahi.
 
 ### 3.4 `X-Algo-Name` header
 
-Algo App se order dene pe required. Abhi bheja nahi jaata.
+**✅ Done.** `UPSTOX_ALGO_NAME` set hone pe live order requests pe
+automatically jaata hai (`modes.orderHeaders()`). Paper pe nahi bhejta.
 
 ### 3.5 Chhoti cheezein
 

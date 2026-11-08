@@ -64,6 +64,31 @@ const config = {
   
   upstoxApiBaseUrl: process.env.UPSTOX_API_BASE_URL.replace(/\/+$/, ''),  // https://api-sandbox.upstox.com/v2
   upstoxAccessToken: process.env.UPSTOX_SANDBOX_ACCESS_TOKEN,
+
+  // --------------------------------------------------------------------------
+  // LIVE trading credentials. All optional: with none of them set the live
+  // environment simply reports "not configured" and refuses every order, while
+  // paper carries on untouched. That is the whole point of the two-mode split
+  // — live can be half-built for weeks without paper noticing.
+  //
+  // Unlike the sandbox token, the live access token is NOT held here. It dies
+  // at 3:30 AM IST every day, so it lives in the broker_tokens table where the
+  // running server can pick up a new one without a redeploy. These three are
+  // what lets the server MINT that token — see services/upstoxAuth.js.
+  // --------------------------------------------------------------------------
+  upstoxApiKey: process.env.UPSTOX_API_KEY || null,
+  upstoxApiSecret: process.env.UPSTOX_API_SECRET || null,
+  upstoxRedirectUri: process.env.UPSTOX_REDIRECT_URI || null,
+
+  // The Algo App's NAME (not its ID). Upstox requires it as X-Algo-Name on
+  // live order placement once the app is registered as an algo.
+  upstoxAlgoName: process.env.UPSTOX_ALGO_NAME || null,
+
+  // Master switch for the whole live environment. Independent of the per-mode
+  // kill switch in app_config: this one decides whether live is wired up at
+  // all, the other decides whether it is currently allowed to trade. Both must
+  // be on. Defaults to OFF so deploying this code never starts live trading.
+  liveEnabled: parseBool(process.env.LIVE_TRADING_ENABLED, false),
   upstoxMaxRetries: parseIntEnv(process.env.UPSTOX_MAX_RETRIES, 2),
   upstoxRetryBaseDelayMs: parseIntEnv(process.env.UPSTOX_RETRY_BASE_DELAY_MS, 500),
 

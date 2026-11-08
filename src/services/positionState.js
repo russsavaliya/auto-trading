@@ -1,6 +1,7 @@
 'use strict';
 
 const supabaseService = require('./supabaseService');
+const { PAPER } = require('../config/modes');
 
 const ENTRY_TARGET_STATE = { CALL_ENTRY: 'IN_CALL', PUT_ENTRY: 'IN_PUT' };
 const EXIT_SOURCE_STATE = { CALL_EXIT: 'IN_CALL', PUT_EXIT: 'IN_PUT' };
@@ -30,8 +31,8 @@ function sourceStateForExit(signalType) {
   return EXIT_SOURCE_STATE[signalType];
 }
 
-async function getState(symbol) {
-  return supabaseService.getPositionState(symbol);
+async function getState(symbol, mode = PAPER) {
+  return supabaseService.getPositionState(symbol, mode);
 }
 
 /**
@@ -39,24 +40,26 @@ async function getState(symbol) {
  * symbol isn't currently FLAT — i.e. we're already in a position, so this
  * entry signal is rejected rather than stacking a second position.
  */
-async function reserveEntry({ symbol, signalType, tradeId }) {
+async function reserveEntry({ symbol, signalType, tradeId, mode = PAPER }) {
   const newState = targetStateForEntry(signalType);
   return supabaseService.transitionPositionState({
     symbol,
     expectedState: 'FLAT',
     newState,
     tradeId,
+    mode,
   });
 }
 
 /** Reverts a reserved entry back to FLAT after an order placement failure. */
-async function rollbackEntry({ symbol, signalType }) {
+async function rollbackEntry({ symbol, signalType, mode = PAPER }) {
   const reservedState = targetStateForEntry(signalType);
   return supabaseService.transitionPositionState({
     symbol,
     expectedState: reservedState,
     newState: 'FLAT',
     tradeId: null,
+    mode,
   });
 }
 
@@ -66,24 +69,26 @@ async function rollbackEntry({ symbol, signalType }) {
  * FLAT or IN_PUT) — that's an orphan/invalid signal and must not place an
  * exit order against a position that doesn't exist.
  */
-async function reserveExit({ symbol, signalType }) {
+async function reserveExit({ symbol, signalType, mode = PAPER }) {
   const expectedState = sourceStateForExit(signalType);
   return supabaseService.transitionPositionState({
     symbol,
     expectedState,
     newState: 'FLAT',
     tradeId: null,
+    mode,
   });
 }
 
 /** Reverts a reserved exit back to its prior side after an order placement failure. */
-async function rollbackExit({ symbol, signalType, tradeId }) {
+async function rollbackExit({ symbol, signalType, tradeId, mode = PAPER }) {
   const priorState = sourceStateForExit(signalType);
   return supabaseService.transitionPositionState({
     symbol,
     expectedState: 'FLAT',
     newState: priorState,
     tradeId,
+    mode,
   });
 }
 

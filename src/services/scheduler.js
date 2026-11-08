@@ -7,6 +7,7 @@ const tradeExecutor = require('./tradeExecutor');
 const marketData = require('./marketData');
 const serialQueue = require('../utils/serialQueue');
 const marketClock = require('../utils/marketClock');
+const modes = require('../config/modes');
 
 /**
  * Enforces the intraday rule: a position opened today is closed today.
@@ -92,22 +93,31 @@ async function considerSymbol(row) {
 
   // Same queue the webhooks use, so a square-off can never interleave with an
   // alert being processed for the same symbol.
-  const result = await serialQueue.enqueue(symbol, () => tradeExecutor.closePosition({ symbol, reason }));
+  const mode = row.mode || modes.PAPER;
+  const result = await serialQueue.enqueue(symbol, () => tradeExecutor.closePosition({ symbol, reason, mode }));
 
   if (result.ok) {
-    logger.info({ symbol, tradeId: result.tradeId, pnl: result.pnl, reason }, 'Square-off complete');
+    logger.info({ symbol, tradeId: result.tradeId, pnl: result.pnl, reason, mode }, 'Square-off complete');
   } else {
-    logger.error({ symbol, tradeId, reason, why: result.reason }, 'Square-off failed — will retry on the next tick');
+    logger.error({ symbol, tradeId, reason, mode, why: result.reason }, 'Square-off failed — will retry on the next tick');
   }
 }
 
 async function tick() {
   try {
-    const positions = await supabaseService.listPositionStates();
-    for (const row of positions) {
-      await considerSymbol(row).catch((err) =>
-        logger.error({ err: err.message, symbol: row.symbol }, 'Square-off check failed for symbol')
-      );
+    // Both environments, each isolated: a live square-off that cannot reach
+    // the broker must not stop paper positions being closed for the day.
+    for (const mode of modes.MODES) {
+      try {
+        const positions = await supabaseService.listPositionStates(mode);
+        for (const row of positions) {
+          await considerSymbol(row).catch((err) =>
+            logger.error({ err: err.message, symbol: row.symbol, mode }, 'Square-off check failed for symbol')
+          );
+        }
+      } catch (err) {
+        logger.error({ err: err.message, mode }, 'Square-off tick failed for mode');
+      }
     }
   } catch (err) {
     logger.error({ err: err.message }, 'Square-off tick failed');

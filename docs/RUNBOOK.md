@@ -211,8 +211,11 @@ minute purane price pe trade karega.
 
 ## Step 6 — Deploy
 
-Render/jahan bhi host hai, wahan naya code deploy karo. Naye env vars **optional
-hain** (sab ka sensible default hai), par chaaho to set kar sakte ho:
+Naya code DigitalOcean droplet pe deploy karo: `bash scripts/deploy-do.sh`
+(market khula ho to script mana kar deti hai; `FORCE=1` se override). Server ki
+env file `/opt/bridge/.env` hai — deploy use kabhi overwrite nahi karta. Naye
+env vars **optional hain** (sab ka sensible default hai), par chaaho to set kar
+sakte ho:
 
 ```
 ENTRY_CUTOFF_IST=14:45

@@ -3,6 +3,7 @@
 const config = require('../config/env');
 const logger = require('../utils/logger');
 const supabaseService = require('./supabaseService');
+const { PAPER } = require('../config/modes');
 
 /**
  * Two independent layers of duplicate protection, deliberately different
@@ -24,15 +25,18 @@ const supabaseService = require('./supabaseService');
  * Either layer tripping means: do not place an order, but still record the
  * alert (webhook_log handles that separately) so it's visible in debugging.
  */
-async function checkDuplicate({ alertId, symbol, signalType }) {
-  const { inserted } = await supabaseService.insertProcessedAlert({ alertId, symbol, signalType });
+async function checkDuplicate({ alertId, symbol, signalType, mode = PAPER }) {
+  // Scoped to the mode: one TradingView alert is expected to open a paper
+  // position AND a live one, so the ledger must not treat the second as a
+  // replay of the first. Within a mode the guarantee is unchanged.
+  const { inserted } = await supabaseService.insertProcessedAlert({ alertId, symbol, signalType, mode });
 
   if (!inserted) {
-    logger.warn({ alertId, symbol, signalType }, 'Duplicate alert_id — already processed, skipping');
+    logger.warn({ alertId, symbol, signalType, mode }, 'Duplicate alert_id — already processed, skipping');
     return { isDuplicate: true, reason: 'duplicate_alert_id' };
   }
 
-  const last = await supabaseService.getLastAlertForSignal({ symbol, signalType, excludeAlertId: alertId });
+  const last = await supabaseService.getLastAlertForSignal({ symbol, signalType, excludeAlertId: alertId, mode });
   if (last) {
     const secondsSinceLast = (Date.now() - new Date(last.received_at).getTime()) / 1000;
     if (secondsSinceLast >= 0 && secondsSinceLast < config.duplicateWindowSeconds) {
