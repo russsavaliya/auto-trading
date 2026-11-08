@@ -10,7 +10,7 @@
   "license": "UNLICENSED",
   "private": true,
   "engines": {
-    "node": ">=18.18.0"
+    "node": ">=22"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
