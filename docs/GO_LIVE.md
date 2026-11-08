@@ -171,8 +171,14 @@ env se overridable hain (`UPSTOX_LIVE_ORDER_BASE_URL`,
 `UPSTOX_LIVE_API_BASE_URL`).
 
 > ⚠️ Ye do alag doc pages se aaya hai jo aapas mein consistent nahi hain
-> (place-order page `api-hft` dikhata hai, overview page nahi). Go-live se
-> pehle apne account pe confirm kar lena.
+> (place-order page `api-hft` dikhata hai, overview page nahi).
+>
+> **✅ 8 Nov 2026 ko account pe check kiya:** droplet (`64.227.153.201`) se,
+> live token aur `X-Algo-Name` ke saath, ek non-existent order ID ka
+> `DELETE /order/cancel` dono hosts pe `UDAPI100010 Order not found` laya —
+> yaani request IP / token / algo-header checks paar karke order lookup tak
+> pahunchi. Koi order bana ya badla nahi. Aakhri saboot pehla asli order hi
+> hoga.
 
 ### 3.2 Token module load pe bake hota hai
 
@@ -265,6 +271,19 @@ Options **buy** kar rahe ho, toh full premium chahiye — margin nahi.
 ek time pe ek position
 buffer ke saath           =  ~₹30,000–40,000
 ```
+
+**8 Nov 2026 ko asli bhav — ₹500 wala andaaza kam tha.** Bridge apne resolver
+se sabse paas wala (monthly) ATM contract leta hai. Shukravaar close pe
+(BANKNIFTY 58,850, 23 Nov expiry):
+
+| Contract | Premium | Ek lot (30) |
+|---|---|---|
+| 58900 CE | ₹814 | ₹24,422 |
+| 58900 PE | ₹826 | ₹24,780 |
+
+Expiry ke paas premium ₹300–500 tak girta hai, par naya monthly cycle shuru
+hote hi phir ₹800–1,000. **1 lot/din ke liye kam se kam ₹30,000–35,000** —
+usse kam pe entry `insufficient funds` pe reject hogi.
 
 ---
 
