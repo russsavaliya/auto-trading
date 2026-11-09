@@ -4,6 +4,7 @@ const axios = require('axios');
 const zlib = require('zlib');
 const config = require('../config/env');
 const logger = require('../utils/logger');
+const marketClock = require('../utils/marketClock');
 
 // Upstox's public instrument master — no auth required, refreshed by Upstox
 // roughly daily. Confirmed reachable and containing NSE F&O contracts by
@@ -86,7 +87,18 @@ async function resolveEntryInstrument({ signalType, symbol, price }) {
     'Resolved ATM instrument'
   );
 
-  return { instrumentToken: m.instrument_key, lotSize: m.lot_size, tradingSymbol: m.trading_symbol };
+  // The contract itself, not just its token: NSE reassigns a token to another
+  // instrument after expiry, so this is the only moment the strike and expiry
+  // can be recorded reliably. Upstox stamps expiry at 23:59:59 IST on the
+  // expiry day, so its IST date is the expiry date.
+  return {
+    instrumentToken: m.instrument_key,
+    lotSize: m.lot_size,
+    tradingSymbol: m.trading_symbol,
+    strikePrice: Number(m.strike_price),
+    optionType: m.instrument_type,
+    expiry: marketClock.istDate(m.expiry),
+  };
 }
 
 /**

@@ -146,11 +146,13 @@ async function openPosition({ alertId, signalType, symbol, spot, score, quantity
   }
 
   let token = instrumentToken;
+  let contract = null;
 
   if (!token) {
     try {
       const resolved = await instrumentResolver.resolveEntryInstrument({ signalType, symbol, price: spot });
       token = resolved.instrumentToken;
+      contract = resolved;
       logger.info({ symbol, signalType, spot, resolved }, 'Auto-resolved ATM instrument for entry');
     } catch (err) {
       logger.error({ err: err.message, symbol, signalType, spot }, 'ATM instrument resolution failed — no order placed');
@@ -163,6 +165,7 @@ async function openPosition({ alertId, signalType, symbol, spot, score, quantity
     signalType,
     symbol,
     instrumentToken: token,
+    contract,
     quantity,
     entrySpot: spot,
     scoreAtEntry: score,

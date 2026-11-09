@@ -236,6 +236,19 @@ async function verifySchema() {
   }
   logger.info('Paper/live mode split is active (migration 005 present)');
 
+  // Migration 006 records which contract each trade used. Optional for
+  // trading (insertTrade falls back without it), but a trade taken without it
+  // can never be traced to its strike once the token is reused.
+  const { error: contractErr } = await supabase.from('trades').select('trading_symbol').limit(1);
+  if (contractErr) {
+    logger.warn(
+      'trades.trading_symbol is missing — run sql/migrations/006_trade_contract.sql. ' +
+        'Trading is unaffected, but new trades are recorded without their strike and expiry.'
+    );
+  } else {
+    logger.info('Contract recording is active (migration 006 present)');
+  }
+
   return { ok: true };
 }
 
@@ -466,22 +479,55 @@ async function transitionPositionState({ symbol, expectedState, newState, tradeI
  * been placed and priced. Keeping the two apart is the whole point of
  * migration 001 — conflating them is what inverted every PUT trade's P&L.
  */
-async function insertTrade({ alertId, signalType, symbol, instrumentToken, quantity, entrySpot, scoreAtEntry, mode = PAPER }) {
-  const { data, error } = await supabase
-    .from('trades')
-    .insert({
-      alert_id: alertId,
-      signal_type: signalType,
-      symbol,
-      instrument_token: instrumentToken,
-      quantity,
-      entry_spot: entrySpot,
-      score_at_entry: scoreAtEntry,
-      mode,
-      status: 'PENDING',
-    })
-    .select('id')
-    .single();
+const CONTRACT_COLUMNS = /trading_symbol|strike_price|option_type|expiry|lot_size/;
+
+async function insertTrade({
+  alertId,
+  signalType,
+  symbol,
+  instrumentToken,
+  contract = null,
+  quantity,
+  entrySpot,
+  scoreAtEntry,
+  mode = PAPER,
+}) {
+  const row = {
+    alert_id: alertId,
+    signal_type: signalType,
+    symbol,
+    instrument_token: instrumentToken,
+    quantity,
+    entry_spot: entrySpot,
+    score_at_entry: scoreAtEntry,
+    mode,
+    status: 'PENDING',
+  };
+  const insert = (values) => supabase.from('trades').insert(values).select('id').single();
+
+  let { data, error } = await insert(
+    contract
+      ? {
+          ...row,
+          trading_symbol: contract.tradingSymbol,
+          strike_price: contract.strikePrice,
+          option_type: contract.optionType,
+          expiry: contract.expiry,
+          lot_size: contract.lotSize,
+        }
+      : row
+  );
+
+  // Migration 006 adds the contract columns. Without it PostgREST rejects the
+  // whole row over an unknown column, which would cost a trade over a
+  // record-keeping field — so record the trade without them and say why.
+  if (error && contract && CONTRACT_COLUMNS.test(error.message || '')) {
+    logger.warn(
+      { err: error.message, tradingSymbol: contract.tradingSymbol },
+      'trades has no contract columns — run sql/migrations/006_trade_contract.sql. Trade recorded without its strike/expiry.'
+    );
+    ({ data, error } = await insert(row));
+  }
 
   if (error) {
     logger.error({ err: error }, 'Failed to insert trade row');
